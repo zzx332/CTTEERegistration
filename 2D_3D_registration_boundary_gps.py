@@ -836,19 +836,19 @@ class TwoD_ThreeD_Registration:
             
             if len(edge_coords) < 5:
                 continue
+            label_points[label_id] = edge_coords
+            # # 转换为物理坐标
+            # spacing = np.array(mask.GetSpacing())
+            # origin = np.array(mask.GetOrigin())
+            # direction = np.array(mask.GetDirection()).reshape(2, 2)
             
-            # 转换为物理坐标
-            spacing = np.array(mask.GetSpacing())
-            origin = np.array(mask.GetOrigin())
-            direction = np.array(mask.GetDirection()).reshape(2, 2)
+            # edge_physical = []
+            # for row, col in edge_coords:
+            #     pixel = np.array([col, row])
+            #     physical = origin + direction @ (spacing * pixel)
+            #     edge_physical.append(physical)
             
-            edge_physical = []
-            for row, col in edge_coords:
-                pixel = np.array([col, row])
-                physical = origin + direction @ (spacing * pixel)
-                edge_physical.append(physical)
-            
-            label_points[label_id] = np.array(edge_physical)
+            # label_points[label_id] = np.array(edge_physical)
         
         return label_points
 
@@ -1613,15 +1613,12 @@ class TwoD_ThreeD_Registration:
         ax3 = plt.subplot(1, 4, 3)
         
         # 方法1：如果尺寸相同，直接叠加
-        if us_array.shape == slice_array.shape and np.allclose(us_extent, slice_extent):
-            overlay = np.zeros((*us_norm.shape, 3))
-            overlay[:, :, 0] = us_norm  # Red: Ultrasound
-            overlay[:, :, 1] = slice_norm  # Green: CT slice
-            ax3.imshow(overlay, extent=us_extent, aspect='auto')
-        else:
-            # 方法2：分别显示两个图像，透明度叠加
-            ax3.imshow(us_norm, cmap='Reds', alpha=0.5, extent=us_extent, aspect='auto')
-            ax3.imshow(slice_norm, cmap='Greens', alpha=0.5, extent=slice_extent, aspect='auto')
+        # if us_array.shape == slice_array.shape:
+        overlay = np.zeros((*us_norm.shape, 3))
+        overlay[:, :, 0] = us_norm  # Red: Ultrasound
+        overlay[:, :, 1] = slice_norm  # Green: CT slice
+        ax3.imshow(overlay, aspect='auto')
+
         
         ax3.set_xlabel('X (mm)', fontsize=12)
         ax3.set_ylabel('Y (mm)', fontsize=12)
@@ -2293,21 +2290,23 @@ class TwoD_ThreeD_Registration:
         # 图像对比：初始
         ax_img_before = axes[0, 0]
         ax_img_before.set_title('Before Registration: Image Overlay', fontsize=14, fontweight='bold')
-        if us_info:
-            ax_img_before.imshow(us_info['array'], cmap='gray', extent=us_info['extent'], alpha=0.7, aspect='auto')
-        if init_ct_info:
-            ax_img_before.imshow(init_ct_info['array'], cmap='summer', alpha=0.5, extent=init_ct_info['extent'], aspect='auto')
+        ax_img_before.grid(True, alpha=0.3)
+        overlay = np.zeros((*us_info['array'].shape, 3))
+        overlay[:, :, 0] = us_info['array']  # Red: Ultrasound
+        overlay[:, :, 1] = init_ct_info['array']  # Green: CT slice
+        ax_img_before.imshow(overlay, aspect='auto')
         ax_img_before.set_xlabel('X (mm)')
         ax_img_before.set_ylabel('Y (mm)')
         ax_img_before.grid(True, alpha=0.3)
-        
+
         # 图像对比：最终
         ax_img_after = axes[0, 1]
         ax_img_after.set_title('After Registration: Image Overlay', fontsize=14, fontweight='bold')
-        if us_info:
-            ax_img_after.imshow(us_info['array'], cmap='gray', extent=us_info['extent'], alpha=0.7, aspect='auto')
-        if final_ct_info:
-            ax_img_after.imshow(final_ct_info['array'], cmap='summer', alpha=0.5, extent=final_ct_info['extent'], aspect='auto')
+        ax_img_after.grid(True, alpha=0.3)
+        overlay = np.zeros((*us_info['array'].shape, 3))
+        overlay[:, :, 0] = us_info['array']  # Red: Ultrasound
+        overlay[:, :, 1] = final_ct_info['array']  # Green: CT slice
+        ax_img_after.imshow(overlay, aspect='auto')
         ax_img_after.set_xlabel('X (mm)')
         ax_img_after.set_ylabel('Y (mm)')
         ax_img_after.grid(True, alpha=0.3)
@@ -2502,6 +2501,7 @@ def register_icp_multi_label():
     initial_params = np.array([
         np.radians(50),   # alpha: 50°
         np.radians(-25),  # beta: -25°
+        # np.radians(0),  # beta: -25°
         np.radians(0),    # gamma: 0°
         5.77, -163.36, 5.0,   # translation: (x, y, z) mm
         1.0, 1.0         # scaling: (sx, sy)
