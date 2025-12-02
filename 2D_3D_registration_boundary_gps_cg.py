@@ -215,6 +215,122 @@ class TwoD_ThreeD_Registration:
         
         return result
 
+    def conjugate_gradient_optimize(
+        self,
+        objective_func: Callable,
+        x0: np.ndarray,
+        bounds: Optional[List[Tuple[float, float]]] = None,
+        max_iter: int = 200,
+        tol: float = 1e-6,
+        grad_step: float = 1e-3,
+        line_search_start: float = 1.0,
+        line_search_shrink: float = 0.5,
+        armijo_coeff: float = 1e-4,
+        beta_strategy: str = "pr"
+    ) -> Dict:
+        """
+        共轭梯度优化器（有限差分梯度 + Armijo线搜索）
+        """
+        x = np.asarray(x0, dtype=float).copy()
+        n = len(x)
+
+        if np.isscalar(grad_step):
+            grad_steps = np.full(n, float(grad_step))
+        else:
+            grad_steps = np.asarray(grad_step, dtype=float)
+            if grad_steps.shape[0] != n:
+                raise ValueError("grad_step长度需与参数数量一致")
+        grad_steps = np.clip(grad_steps, 1e-8, None)
+
+        def project(point: np.ndarray) -> np.ndarray:
+            if bounds is None:
+                return point
+            projected = point.copy()
+            for i, (lb, ub) in enumerate(bounds):
+                if lb is not None:
+                    projected[i] = max(projected[i], lb)
+                if ub is not None:
+                    projected[i] = min(projected[i], ub)
+            return projected
+
+        n_func_evals = 0
+
+        def evaluate(point: np.ndarray) -> float:
+            nonlocal n_func_evals
+            value = objective_func(point)
+            n_func_evals += 1
+            return value
+
+        def finite_difference_grad(point: np.ndarray) -> np.ndarray:
+            grad = np.zeros_like(point)
+            for idx in range(n):
+                delta = np.zeros(n)
+                delta[idx] = grad_steps[idx]
+                f_plus = evaluate(project(point + delta))
+                f_minus = evaluate(project(point - delta))
+                grad[idx] = (f_plus - f_minus) / (2.0 * grad_steps[idx])
+            return grad
+
+        x = project(x)
+        f_value = evaluate(x)
+        grad = finite_difference_grad(x)
+        direction = -grad
+        history = []
+        status = "max_iter_reached"
+
+        for iteration in range(max_iter):
+            grad_norm = np.linalg.norm(grad)
+            history.append({
+                "iter": iteration,
+                "x": x.copy(),
+                "f": f_value,
+                "grad_norm": grad_norm
+            })
+
+            if grad_norm < tol:
+                status = "grad_tol"
+                break
+
+            step = line_search_start
+            accepted = False
+            while step > 1e-8:
+                candidate = project(x + step * direction)
+                f_candidate = evaluate(candidate)
+                if f_candidate <= f_value + armijo_coeff * step * np.dot(grad, direction):
+                    accepted = True
+                    break
+                step *= line_search_shrink
+
+            if not accepted:
+                status = "line_search_failed"
+                break
+
+            x = candidate
+            f_value = f_candidate
+            grad_new = finite_difference_grad(x)
+            denom = np.dot(grad, grad) + 1e-12
+            if beta_strategy.lower() == "fr":
+                beta = np.dot(grad_new, grad_new) / denom
+            else:
+                beta = max(0.0, np.dot(grad_new, grad_new - grad) / denom)
+
+            direction = -grad_new + beta * direction
+            grad = grad_new
+        else:
+            status = "max_iter_reached"
+
+        success = status != "line_search_failed"
+        return {
+            "x": x,
+            "fun": f_value,
+            "grad_norm": float(np.linalg.norm(grad)),
+            "nit": len(history),
+            "nfev": n_func_evals,
+            "status": status,
+            "success": success,
+            "history": history
+        }
+
     def coordinate_cyclic_search(
         self,
         objective_func: Callable,
@@ -1164,9 +1280,11 @@ class TwoD_ThreeD_Registration:
                 ub_norm = ub
             bounds_norm.append((lb_norm, ub_norm))
         start_time = time.time()
+        inner_optimizer_params = dict(inner_optimizer_params or {})
         
+        method_lower = method.lower()
         # 根据方法选择优化器
-        if method.lower() == 'de':
+        if method_lower == 'de':
             # 差分进化（全局优化）
             print("  使用差分进化算法（全局搜索）...")
             result = differential_evolution(
@@ -1178,9 +1296,21 @@ class TwoD_ThreeD_Registration:
                 tol=0.001,
                 workers=1
             )
-            best_params = result.x
+            best_params_norm = result.x
             final_mi = -result.fun
-            
+
+        elif method_lower in {'cg', 'conjugate_gradient'}:
+            print("  使用共轭梯度算法（有限差分梯度）...")
+            result = self.conjugate_gradient_optimize(
+                objective_func=self.objective_normalized,
+                x0=initial_params_norm,
+                bounds=bounds_norm,
+                max_iter=max_iterations,
+                tol=1e-4
+            )
+            best_params_norm = result['x']
+            final_mi = -result['fun']
+
         else:
             # 局部优化
             print(f"  使用{method}算法（局部优化）...")
@@ -1194,10 +1324,9 @@ class TwoD_ThreeD_Registration:
             )
             # 反归一化最优参数
             best_params_norm = result.x
-            best_params = best_params_norm.copy()
-            best_params = best_params_norm * self.param_scales
-            # best_params[6:] = best_params_norm[6:] * self.param_scales[6:] + 1.0
             final_mi = -result.fun
+
+        best_params = np.asarray(best_params_norm) * self.param_scales
         
         elapsed_time = time.time() - start_time
         
@@ -1924,7 +2053,8 @@ class TwoD_ThreeD_Registration:
         max_correspondence_dist: float = 50.0,
         inner_opt_iterations: int = 50,
         min_iterations: int = 10,
-        use_gps: bool = True,
+        inner_optimizer: str = 'gps',
+        inner_optimizer_params: Optional[Dict[str, float]] = {},
         labels: List[int] = [1, 2, 3, 4],
         label_weights: Optional[Dict[int, float]] = None
     ) -> Tuple[np.ndarray, dict]:
@@ -1938,7 +2068,8 @@ class TwoD_ThreeD_Registration:
             max_correspondence_dist: 最大对应点距离阈值（mm）
             inner_opt_iterations: 每次ICP迭代内部的优化迭代次数
             min_iterations: 最小迭代次数，避免过早停止
-            use_gps: 是否使用广义模式搜索（GPS），False则使用Powell方法
+            inner_optimizer: 内层优化器类型（'gps'、'coordinate'、'conjugate_gradient'）
+            inner_optimizer_params: 内层优化器参数（可选）
             labels: 要使用的标签列表
             label_weights: 各标签的权重（可选）
         
@@ -2089,7 +2220,7 @@ class TwoD_ThreeD_Registration:
                     if len(ct_pts_dict) == 0:
                         return 1e6
                     
-                    # # 计算多标签代价
+                    # 计算多标签代价
                     # cost = self.compute_multi_label_correspondence_cost(
                     #     ct_pts_dict,
                     #     us_label_points,
@@ -2113,43 +2244,73 @@ class TwoD_ThreeD_Registration:
             
             # 使用优化器
             print(f"\n  [参数优化]")
-            if use_gps:
+            optimizer_mode = inner_optimizer.lower()
+            if optimizer_mode == 'gps':
                 print(f"    使用GPS优化...")
-                
-                gps_step_scales = np.array([2.0, 2.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0], dtype=float)
-                gps_contraction = np.array([0.9, 0.9, 0.9, 0.6, 0.6, 0.6, 0.75, 0.75], dtype=float)
-                gps_expansion = np.array([1.1, 1.1, 1.1, 1.3, 1.3, 1.3, 1.05, 1.05], dtype=float)
+                gps_step_scales = np.array(
+                    inner_optimizer_params.get('step_scales', [2.0, 2.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0]),
+                    dtype=float
+                )
+                gps_contraction = np.array(
+                    inner_optimizer_params.get('per_dim_contraction', [0.9, 0.9, 0.9, 0.6, 0.6, 0.6, 0.75, 0.75]),
+                    dtype=float
+                )
+                gps_expansion = np.array(
+                    inner_optimizer_params.get('per_dim_expansion', [1.1, 1.1, 1.1, 1.3, 1.3, 1.3, 1.05, 1.05]),
+                    dtype=float
+                )
 
                 result = self.generalized_pattern_search(
                     correspondence_cost,
                     x0=params,
                     bounds=bounds_norm,
                     max_iter=inner_opt_iterations,
-                    tol=1e-6,
-                    initial_step=0.1,
-                    expansion_factor=2.0,
-                    contraction_factor=0.5,
+                    tol=inner_optimizer_params.get('tol', 1e-6),
+                    initial_step=inner_optimizer_params.get('initial_step', 0.1),
+                    expansion_factor=inner_optimizer_params.get('expansion_factor', 2.0),
+                    contraction_factor=inner_optimizer_params.get('contraction_factor', 0.5),
                     step_scales=gps_step_scales,
                     per_dim_contraction=gps_contraction,
                     per_dim_expansion=gps_expansion,
-                    min_step=1e-8
+                    min_step=inner_optimizer_params.get('min_step', 1e-8)
                 )
                 
                 print(f"    GPS评估次数: {result['nfev']}")
                 print(f"    GPS最终步长: {result['final_step_size']:.2e}")
-            else:
+            elif optimizer_mode in {'coordinate', 'cyclic'}:
                 print(f"    使用坐标轮换搜索...")
-                coord_steps = np.array([0.05, 0.05, 0.05, 1, 1, 1, 0.02, 0.02], dtype=float)
+                coord_steps = np.array(
+                    inner_optimizer_params.get('per_dim_initial_step', [0.05, 0.05, 0.05, 1, 1, 1, 0.02, 0.02]),
+                    dtype=float
+                )
                 result = self.coordinate_cyclic_search(
                     correspondence_cost,
                     x0=params,
                     bounds=bounds_norm,
                     max_iter=inner_opt_iterations,
-                    initial_step=0.2,
+                    initial_step=inner_optimizer_params.get('initial_step', 0.2),
                     per_dim_initial_step=coord_steps,
-                    step_decay=0.6,
-                    min_step=1e-4
+                    step_decay=inner_optimizer_params.get('step_decay', 0.6),
+                    min_step=inner_optimizer_params.get('min_step', 1e-4)
                 )
+            elif optimizer_mode in {'cg', 'conjugate_gradient'}:
+                print(f"    使用共轭梯度优化...")
+                result = self.conjugate_gradient_optimize(
+                    objective_func=correspondence_cost,
+                    x0=params,
+                    bounds=bounds_norm,
+                    max_iter=inner_opt_iterations,
+                    tol=inner_optimizer_params.get('tol', 1e-4),
+                    grad_step=inner_optimizer_params.get('grad_step', 1e-3),
+                    line_search_start=inner_optimizer_params.get('line_search_start', 1.0),
+                    line_search_shrink=inner_optimizer_params.get('line_search_shrink', 0.5),
+                    armijo_coeff=inner_optimizer_params.get('armijo_coeff', 1e-4),
+                    beta_strategy=inner_optimizer_params.get('beta_strategy', 'pr')
+                )
+                print(f"    CG评估次数: {result['nfev']}")
+                print(f"    CG状态: {result['status']}")
+            else:
+                raise ValueError(f"未知内层优化器: {inner_optimizer}")
             
             # 更新参数
             params = result['x'] if isinstance(result, dict) else result.x
@@ -2632,8 +2793,10 @@ def register_icp_multi_label():
    
     # 加载数据（包括mask）
     ct_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\CT_resampled_nii\Patient_0036.nii.gz"
+    # ultrasound_path = r"D:\dataset\TEECT_data\tee_paired\Patient_0036\slice_117_t5.0_rx25_ry0_initial_transform.nii.gz"
     ultrasound_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\Multi-view_preprocess_images\Patient_0036\A4C1_initial_transform.nii.gz"
     ct_mask_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\Segmentation\Patient_0036\Patient_0036_label.nii.gz"  # CT心脏mask路径
+    # us_mask_path = r"D:\dataset\TEECT_data\tee_paired\Patient_0036\slice_117_t5.0_rx25_ry0_initial_transform_1.nii.gz"
     us_mask_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\Multi-view_preprocess_images\Patient_0036\A4C_seg1_initial_transform.nii.gz"
     output_dir = r"D:\dataset\TEECT_data\registration_results_paired\2d_3d_multi_label\Patient_0036"
     
@@ -2662,7 +2825,7 @@ def register_icp_multi_label():
         max_correspondence_dist=30.0,  # 最大对应距离30mm
         inner_opt_iterations=30,  # 每次ICP迭代内部优化30次
         min_iterations=2,  # 最小迭代次数（避免过早停止）
-        use_gps=False,  # 使用坐标轮换搜索而非GPS（更稳定）
+        inner_optimizer='coordinate',  # 使用坐标轮换搜索而非GPS（更稳定）
         labels=[1, 2, 3, 4],  # 使用所有四腔标签
         label_weights=None  # 默认权重
     )

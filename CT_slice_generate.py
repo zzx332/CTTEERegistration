@@ -26,6 +26,8 @@ class CT3DSliceGenerator:
         self.spacing = np.array(self.image.GetSpacing())
         self.origin = np.array(self.image.GetOrigin())
         self.size = np.array(self.image.GetSize())
+        self.direction = np.array(self.image.GetDirection()).reshape(3, 3)    
+        self.ct_center = self.origin + self.direction @ (self.size * self.spacing / 2.0)
         
     def _load_image(self, image_path: str) -> sitk.Image:
         """
@@ -162,9 +164,8 @@ class CT3DSliceGenerator:
         
         normal = np.array(normal_vector)
         normal = normal / np.linalg.norm(normal)
-        direction = np.array(self.image.GetDirection()).reshape(3, 3)
         # image_x_axis = direction[:, 0]  # 图像X轴
-        image_y_axis = direction[:, 1]  # 图像Y轴
+        image_y_axis = self.direction[:, 1]  # 图像Y轴
         # 构建初始平面的正交坐标系
         # 法向为Z轴，构建X轴和Y轴
         if abs(normal[2]) < 0.9:
@@ -187,8 +188,8 @@ class CT3DSliceGenerator:
         for trans in translations:
             for rot_x in rotations_x:
                 for rot_y in rotations_y:
-                    if plane_id == 121:
-                        print(f"trans: {trans}, rot_x: {rot_x}, rot_y: {rot_y}")
+                    # if plane_id == 122:
+                    #     print(f"trans: {trans}, rot_x: {rot_x}, rot_y: {rot_y}")
                     # 计算新的中心点（沿法向平移）
                     new_center = center + trans * normal
                     
@@ -223,7 +224,7 @@ class CT3DSliceGenerator:
         print(f"生成了 {len(slice_planes)} 个候选平面")
         return slice_planes
     
-    def extract_slice(self, plane_params: dict) -> np.ndarray:
+    def extract_slice(self, plane_params: dict, label_tag: bool = False) -> np.ndarray:
         """
         从3D图像中提取指定平面的2D切片
         
@@ -253,11 +254,15 @@ class CT3DSliceGenerator:
         origin = center - (size[0] * spacing[0] / 2.0) * x_axis - (size[1] * spacing[1] / 2.0) * y_axis
         resampler.SetOutputOrigin(origin.tolist())
         
-        # 设置插值方法
-        # resampler.SetInterpolator(sitk.sitkLinear)
-        # resampler.SetDefaultPixelValue(-3024)  # CT的空气HU值
-        resampler.SetInterpolator(sitk.sitkNearestNeighbor)
-        resampler.SetDefaultPixelValue(0)  # CT的空气HU值
+
+        # label
+        if label_tag:
+            resampler.SetInterpolator(sitk.sitkNearestNeighbor)
+            resampler.SetDefaultPixelValue(0)  
+        else:
+            resampler.SetInterpolator(sitk.sitkLinear)
+            resampler.SetDefaultPixelValue(-3024)  # CT的空气HU值
+
         
         # 执行重采样
         slice_image = resampler.Execute(self.image)
@@ -270,7 +275,8 @@ class CT3DSliceGenerator:
     def extract_all_slices(
         self,
         slice_planes: List[dict],
-        output_dir: str = None
+        output_dir: str = None,
+        label_tag: bool = False
     ) -> List[np.ndarray]:
         """
         提取所有候选平面的切片
@@ -287,23 +293,32 @@ class CT3DSliceGenerator:
         if output_dir:
             output_path = Path(output_dir)
             output_path.mkdir(parents=True, exist_ok=True)
-        
+        csv_data = []
         for i, plane in enumerate(slice_planes):
-            if i != 121:
-                continue
+            # if i != 122:
+            #     continue
             print(f"提取切片 {i+1}/{len(slice_planes)}: "
                   f"平移={plane['translation']:.1f}mm, "
                   f"旋转X={plane['rotation_x']:.0f}°, "
                   f"旋转Y={plane['rotation_y']:.0f}°")
             
-            slice_array = self.extract_slice(plane)
+            slice_array = self.extract_slice(plane, label_tag=label_tag)
             slices.append(slice_array)
             # 保存切片
             if output_dir:
                 # 修改文件名扩展名
                 filename = f"slice_{i:03d}_t{plane['translation']:.1f}_rx{plane['rotation_x']:.0f}_ry{plane['rotation_y']:.0f}.nii.gz"
+                translation = plane['center'] - self.ct_center
                 self._save_slice_image(slice_array, output_path / filename, plane_params=plane)
-                
+                csv_data.append({'filename': filename, 'translation': translation.tolist()})
+        if output_dir:
+            import csv
+            csv_path = output_path / 'slice_parameters.csv'
+            with open(csv_path, 'w', newline='', encoding='utf-8') as csvfile:
+                fieldnames = ['filename', 'translation']
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(csv_data)
         return slices
     
     def _save_slice_image(self, slice_array: np.ndarray, filepath: Path, plane_params: dict = None):
@@ -343,13 +358,8 @@ class CT3DSliceGenerator:
             slice_image.SetDirection(direction_2d)
         
         # 保存为NII.GZ格式，保留原始HU值
-        # sitk.WriteImage(slice_image, str(filepath), useCompression=True)
-        sitk.WriteImage(slice_image, r"D:\dataset\TEECT_data\ct\label.nii.gz", useCompression=True)
-        img = sitk.ReadImage(r"D:\dataset\TEECT_data\ct\label.nii.gz")
-        print(img.GetDirection())
-        print(slice_image.GetDirection())
-        if img.GetDirection() != slice_image.GetDirection():
-            print("direction is not the same")
+        sitk.WriteImage(slice_image, str(filepath), useCompression=True)
+
     
     def visualize_sample_slices(
         self,
@@ -398,13 +408,19 @@ def main():
     # ===== 配置参数 =====
     
     # CT图像路径（修改为你的实际路径）
-    ct_image_path = "D:\dataset\CT\MM-WHS2017\ct_train\ct_train_1004_label.nii"  # 或DICOM文件夹路径
-    
+    # ct_image_path = "D:\dataset\CT\MM-WHS2017\ct_train\ct_train_1004_label.nii"  # 或DICOM文件夹路径
+    ct_image_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\CT_resampled_nii\Patient_0036.nii.gz"  # 或DICOM文件夹路径
+    # ct_image_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\Segmentation\Patient_0036\Patient_0036_label.nii.gz"  # 或DICOM文件夹路径
+    output_dir = "D:\dataset\TEECT_data\ct_paired\Patient_0036_image"      # 输出目录
+    # output_dir = "D:\dataset\TEECT_data\ct_paired\Patient_0000_label"      # 输出目录
+    label_tag = False
     # 初始平面中心点（体素坐标）
     # 例如：图像中心或感兴趣区域的中心
     # 可以设置为图像中心：(size[0]/2, size[1]/2, size[2]/2)
     # center_point_voxel = None  # 设置为None时自动使用图像中心，或手动指定如 (128, 128, 64)
-    center_point_voxel = (274,254,100)
+    # center_point_voxel = (274,254,100)
+    # center_point_voxel = (100,86,81) #Patient_0000
+    center_point_voxel = (90,88,62) #Patient_0036
     use_voxel_coord = True  # 使用体素坐标
     
     # 初始平面法向量（不需要归一化）
@@ -421,8 +437,6 @@ def main():
     # 输出切片的大小和分辨率
     slice_size = (512, 512)           # 像素
     slice_spacing = (0.5, 0.5)        # mm
-    
-    output_dir = "D:\dataset\TEECT_data\ct\ct_train_1004_label"      # 输出目录
     
     # ===== 执行切片生成 =====
     
@@ -471,7 +485,8 @@ def main():
     print(f"\n开始提取切片...")
     slices = generator.extract_all_slices(
         slice_planes=slice_planes,
-        output_dir=output_dir
+        output_dir=output_dir,
+        label_tag=label_tag
     )
     
     print(f"\n切片提取完成！共生成 {len(slices)} 个切片")

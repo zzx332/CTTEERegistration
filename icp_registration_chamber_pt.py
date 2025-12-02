@@ -603,8 +603,8 @@ class EdgeBasedICPRegistration:
         # fixed_img = sitk.Flip(fixed_img, flipAxes=[True, True])
         # fixed_img.SetOrigin((0,0))
         # print("    已转换为左手坐标系（X轴翻转, Y轴翻转）")
-        moving_img = sitk.Flip(moving_img, flipAxes=[True, True])
-        moving_img.SetOrigin((0,0))
+        # moving_img = sitk.Flip(moving_img, flipAxes=[True, True])
+        # moving_img.SetOrigin((0,0))
         print("    已转换为左手坐标系（X轴翻转, Y轴翻转）")
         fixed_array = sitk.GetArrayFromImage(fixed_img).squeeze()
         moving_array = sitk.GetArrayFromImage(moving_img).squeeze()
@@ -965,11 +965,12 @@ class EdgeBasedICPRegistration:
         # fixed_img = sitk.Flip(fixed_img_original, flipAxes=[True, True])
         # fixed_img.SetOrigin((0, 0))
         fixed_img = sitk.ReadImage(fixed_label_path)
-        moving_img_original = sitk.ReadImage(moving_label_path)
+        # moving_img_original = sitk.ReadImage(moving_label_path)
+        moving_img = sitk.ReadImage(moving_label_path)
 
         # 对fixed图像进行翻转（与之前的预处理保持一致）
-        moving_img = sitk.Flip(moving_img_original, flipAxes=[True, True])
-        moving_img.SetOrigin((0, 0))
+        # moving_img = sitk.Flip(moving_img_original, flipAxes=[True, True])
+        # moving_img.SetOrigin((0, 0))
 
         # 定义要使用的标签ID（四个心腔）
         label_ids = [1, 2, 3, 4]
@@ -1121,9 +1122,10 @@ def main():
     # 单个配准示例
     # moving_label_path = r"D:\dataset\TEECT_data\ct\ct_train_1004_label_remapped\slice_062_t0.0_rx0_ry0.nii.gz"
     # fixed_label_path = r"D:\dataset\TEECT_data\tee\patient-1-4\slice_060_label.nii.gz"
-    fixed_label_path = r"D:\dataset\TEECT_data\ct\ct_train_1004_label_remapped\slice_121_t5.0_rx50_ry-25.nii.gz"
-    moving_label_path = r"D:\dataset\TEECT_data\tee\patient-1-4\slice_060_label.nii.gz"
-    output_dir = r"D:\dataset\TEECT_data\registration_results\icp_chamber_pt"
+    # fixed_label_path = r"D:\dataset\TEECT_data\ct_paired\slice_121_t5.0_rx50_ry-25.nii.gz"
+    fixed_label_path = r"D:\dataset\TEECT_data\ct_paired\Patient_0000_label\slice_067_t0.0_rx25_ry0.nii.gz"
+    moving_label_path = r"D:\dataset\TEECT_data\tee_paired\Patient_0000\A4C_seg.nii.gz"
+    output_dir = r"D:\dataset\TEECT_data\registration_results_paired\icp_chamber_pt"
 
 
     moving_landmarks, fixed_landmarks = icp_reg.compute_landmarks(fixed_label_path, moving_label_path)
@@ -1195,9 +1197,10 @@ def batch_registration_example():
     
     icp_reg = EdgeBasedICPRegistration()
     
-    moving_label_dir = r"D:\dataset\TEECT_data\ct\ct_train_1004_label_remapped"
-    fixed_label_path = r"D:\dataset\TEECT_data\tee\patient-1-4\slice_060_label.nii.gz"
-    output_dir = r"D:\dataset\TEECT_data\registration_results\icp_chamber_pt_batch"
+    moving_label_dir = r"D:\dataset\TEECT_data\ct_paired\Patient_0036_label"
+    # fixed_label_path = r"D:\dataset\TEECT_data\tee_paired\Patient_0036\A4C_seg.nii.gz"
+    fixed_label_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\Multi-view_preprocess_images\Patient_0036\A4C_seg1.nii.gz"
+    output_dir = r"D:\dataset\TEECT_data\registration_results_paired\icp_chamber_pt_batch"
 
     
     icp_reg.batch_register(
@@ -1259,10 +1262,10 @@ def landmark_registration_example():
 
 if __name__ == "__main__":
     # 运行单个配准
-    main()
+    # main()
     
     # 或运行批量配准
-    # batch_registration_example()
+    batch_registration_example()
     
     # 或运行基于已知对应关系的配准
     # landmark_registration_example()

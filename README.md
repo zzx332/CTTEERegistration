@@ -1,81 +1,22 @@
-# 3D CT切片生成器
+# Guideline
 
-从3D CT图像中生成多个候选2D切片的工具，支持平移和旋转变换。
+规范化2D US-CT配准的workflow
 
-## 功能特性
+## 预处理
 
-- ✅ 支持多种医学图像格式（NIfTI、DICOM系列）
-- ✅ 法向平移：±5mm范围，2.5mm步长
-- ✅ 双轴旋转：±90度范围，45度步长
-- ✅ 生成5×5×5=125个候选平面
-- ✅ 高质量图像重采样（线性插值）
-- ✅ 自动保存切片图像
-- ✅ 可视化样本展示
-- ✅ 灵活的配置系统
-
-## 安装依赖
-
-```bash
-pip install -r requirements.txt
+- 使用`totalsegmentator`对CT volume进行分割
 ```
-
-## 快速开始
-
-### 1. 准备CT图像
-
-将你的CT图像放在项目目录中，支持以下格式：
-- NIfTI格式：`.nii` 或 `.nii.gz`
-- DICOM系列：一个包含DICOM文件的文件夹
-
-### 2. 配置参数
-
-编辑 `config.py` 文件，设置以下参数：
-
-```python
-# CT图像路径
-CT_IMAGE_PATH = "data/ct_image.nii.gz"
-
-# 初始平面中心点（mm）
-CENTER_POINT = (0.0, 0.0, 0.0)
-
-# 初始平面法向量
-NORMAL_VECTOR = (0.0, 0.0, 1.0)  # 轴向平面
+TotalSegmentator -i D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\CT_resampled_nii\Patient_0000.nii.gz -o D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\Segmentation -ta heartchambers_highres --device cpu
 ```
+- 对超声图像进行分割（手动分割或者训练nnunet模型或者尝试阈值分割）
+- 使用`us_mask_dim.py`超声分割保存之后矫正维度
+## 粗配准（基于四腔质心距离）
 
-### 3. 运行程序
+- 使用`CT_slice_generate.py`生成CT volume的切片，`center_point_voxel`设置为二尖瓣像素坐标（四腔视图）
+- 使用`icp_registration_chamber_pt.py`把单个超声图像和每个切片分别进行配准
+- 选取其中结果最好的切片（dice最高或者互信息最好等）
 
-```bash
-python main.py
-```
+## 精配准（基于四腔边缘的双向chamber距离）
 
-程序将生成125个切片并保存到 `output_slices/` 目录。
-
-## 详细说明
-
-### 坐标系统
-
-- **物理坐标**：使用图像的物理空间坐标（mm）
-- **法向量**：定义切片平面的方向
-  - `(0, 0, 1)` - 轴向平面（Axial）
-  - `(0, 1, 0)` - 冠状平面（Coronal）
-  - `(1, 0, 0)` - 矢状平面（Sagittal）
-
-### 变换参数
-
-#### 平移参数
-- **范围**：±5mm
-- **步长**：2.5mm
-- **生成位置**：-5, -2.5, 0, 2.5, 5（共5个）
-
-#### 旋转参数
-- **范围**：±90度
-- **步长**：45度
-- **旋转轴**：两个垂直于法向的正交轴
-- **生成角度**：-90, -45, 0, 45, 90（每轴5个）
-
-#### 总平面数
-5（平移）× 5（X轴旋转）× 5（Y轴旋转）= **125个候选平面**
-
-### 输出文件
-
-每个切片保存为PNG图像，文件名格式：
+- 把切片的位置映射到原始Volume，平移计算：切片中心物理位置 - CT Volume中心物理位置(可以从切片生成时保存的平移参数文件查询)
+- `2D_3D_registration_boundary_gps.py`，`register_icp_multi_label()`。可设置坐标轮换或者是GPS
