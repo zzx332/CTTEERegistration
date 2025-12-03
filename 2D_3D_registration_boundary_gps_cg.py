@@ -9,9 +9,10 @@ from scipy.optimize import minimize, differential_evolution
 from pathlib import Path
 import matplotlib.pyplot as plt
 from typing import Tuple, Optional, Callable, List, Dict
+from scipy.spatial import cKDTree
 import time
-
 import os
+
 os.environ['ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS'] = '1'  # 可选
 sitk.ProcessObject_SetGlobalWarningDisplay(False)  
 
@@ -125,7 +126,7 @@ class TwoD_ThreeD_Registration:
         n_iter = 0
         n_func_evals = 1
         history = []
-        
+        best_cost = float('inf')
         while n_iter < max_iter and step_size > min_step:
             improved = False
             
@@ -186,14 +187,33 @@ class TwoD_ThreeD_Registration:
                     step_scales = step_scales * per_dim_contraction
 
             step_scales = np.clip(step_scales, min_step, None)
-            
-            # 记录历史
+
+            if f_current < best_cost:
+                best_cost = f_current
+                best_params = x.copy()
+                # print(f"    ✓ 更新最优代价: {best_cost:.3f}mm")
+
             history.append({
                 'x': x.copy(),
                 'f': f_current,
                 'step_size': step_size,
-                'n_func_evals': n_func_evals
+                'n_func_evals': n_func_evals,
+                'best_cost': best_cost,
+                'best_params': best_params.copy(),
             })
+
+            if n_iter % 10 == 0:
+                print(f"{'='*60}")
+                print(f"  评估当前轮次{n_iter + 1}次...当前轮次代价: {f_current:.3f}mm")
+                mean_dist, label_mean_dists = self.evaluate_metric(x, self.labels, self.us_label_points)
+                # 记录历史
+                self.optimization_history.append({
+                    'icp_iteration': n_iter + 1,
+                    'params': x.copy(),
+                    'mean_distance': mean_dist,
+                    'label_distances': label_mean_dists.copy(),
+                    'optimized_cost': f_current
+                })
             
             n_iter += 1
             
@@ -210,7 +230,9 @@ class TwoD_ThreeD_Registration:
             'success': step_size < tol or n_iter >= max_iter,
             'message': f'GPS优化完成: 步长={step_size:.2e}, 迭代={n_iter}',
             'final_step_size': step_size,
-            'history': history
+            'history': history,
+            'best_cost': best_cost,
+            'best_params': best_params.copy()
         }
         
         return result
@@ -277,15 +299,34 @@ class TwoD_ThreeD_Registration:
         direction = -grad
         history = []
         status = "max_iter_reached"
-
+        best_cost = float('inf')
         for iteration in range(max_iter):
             grad_norm = np.linalg.norm(grad)
+            if f_value < best_cost:
+                best_cost = f_value
+                best_params = x.copy()
+
             history.append({
                 "iter": iteration,
-                "x": x.copy(),
-                "f": f_value,
-                "grad_norm": grad_norm
+                'x': x.copy(),
+                'f': f_value,
+                "grad_norm": grad_norm,
+                'best_cost': best_cost,
+                'best_params': best_params.copy(),
             })
+
+            if iteration % 10 == 0:
+                print(f"{'='*60}")
+                print(f"  评估当前轮次{iteration + 1}次...当前轮次代价: {f_value:.3f}mm")
+                mean_dist, label_mean_dists = self.evaluate_metric(x, self.labels, self.us_label_points)
+                # 记录历史
+                self.optimization_history.append({
+                    'icp_iteration': iteration + 1,
+                    'params': x.copy(),
+                    'mean_distance': mean_dist,
+                    'label_distances': label_mean_dists.copy(),
+                    'optimized_cost': f_value
+                })
 
             if grad_norm < tol:
                 status = "grad_tol"
@@ -328,7 +369,9 @@ class TwoD_ThreeD_Registration:
             "nfev": n_func_evals,
             "status": status,
             "success": success,
-            "history": history
+            "history": history,
+            "best_cost": best_cost,
+            "best_params": best_params.copy()
         }
 
     def coordinate_cyclic_search(
@@ -369,7 +412,7 @@ class TwoD_ThreeD_Registration:
         f_current = objective_func(x)
         n_func_evals = 1
         history = []
-        
+        best_cost = float('inf')
         for it in range(max_iter):
             improved = False
             for dim in range(n):
@@ -386,16 +429,37 @@ class TwoD_ThreeD_Registration:
                         break
                 if improved:
                     break
-            
+
+            if f_current < best_cost:
+                best_cost = f_current
+                best_params = x.copy()
+                # print(f"    ✓ 更新最优代价: {best_cost:.3f}mm")
+
             history.append({
                 'x': x.copy(),
                 'f': f_current,
-                'step_sizes': step_sizes.copy()
+                'step_sizes': step_sizes.copy(),
+                'best_cost': best_cost,
+                'best_params': best_params.copy(),
             })
-            
+
+            if it % 10 == 0:
+                print(f"{'='*60}")
+                print(f"  评估当前轮次{it + 1}次...当前轮次代价: {f_current:.3f}mm")
+                mean_dist, label_mean_dists = self.evaluate_metric(x, self.labels, self.us_label_points)
+                # 记录历史
+                self.optimization_history.append({
+                    'icp_iteration': it + 1,
+                    'params': x.copy(),
+                    'mean_distance': mean_dist,
+                    'label_distances': label_mean_dists.copy(),
+                    'optimized_cost': f_current
+                })
+
             if not improved:
                 step_sizes *= step_decay
                 if np.all(step_sizes < min_step):
+                    print(f"    ⚠️ 步长小于最小步长，停止优化")
                     break
             else:
                 continue
@@ -408,7 +472,9 @@ class TwoD_ThreeD_Registration:
             'success': True,
             'message': 'Coordinate cyclic search completed',
             'history': history,
-            'final_step_sizes': step_sizes
+            'final_step_sizes': step_sizes,
+            'best_cost': best_cost,
+            'best_params': best_params.copy()
         }
         return result
         
@@ -454,7 +520,27 @@ class TwoD_ThreeD_Registration:
         print(f"  CT spacing: {self.ct_volume.GetSpacing()}")
         print(f"  超声尺寸: {self.ultrasound_2d.GetSize()}")
         print(f"  超声spacing: {self.ultrasound_2d.GetSpacing()}")
-        
+
+    def orthogonalize_direction_2d(self, direction):
+        """
+        direction: 长度为 4 的 tuple/list，对应 2×2 矩阵 (row-major)
+        返回新的正交方向（仍然是 row-major）
+        """
+        d = np.array(direction).reshape(2,2)
+
+        # 第 1 列
+        e1 = d[:,0]
+        e1 = e1 / np.linalg.norm(e1)
+
+        # 第 2 列，正交化： e2 = e2 - (e2·e1)*e1
+        e2 = d[:,1]
+        e2 = e2 - np.dot(e2, e1) * e1
+        e2 = e2 / np.linalg.norm(e2)
+
+        # 重组为 2×2 row-major
+        d_new = np.column_stack((e1, e2)).reshape(-1)
+        return tuple(d_new)
+
     def extract_slice_from_volume(
         self,
         alpha: float,
@@ -552,7 +638,8 @@ class TwoD_ThreeD_Registration:
         ct_origin = np.array(self.ct_volume.GetOrigin())
         # 适应不同方向
         ct_direction = np.array(self.ct_volume.GetDirection()).reshape(3, 3)    
-        ct_center = ct_origin + ct_direction @ (ct_size * ct_spacing / 2.0)
+        ct_center = ct_origin + ct_direction @ ((ct_size - 1) * ct_spacing / 2.0)
+        # ct_center = ct_origin +  ((ct_size - 1) * ct_spacing / 2.0)
         # R_ct_space = ct_direction @ R @ ct_direction.T
         # 切片中心（在3D空间中，经过旋转和平移后）
         slice_center = ct_center + np.array([tx, ty, tz])
@@ -596,9 +683,10 @@ class TwoD_ThreeD_Registration:
         extractor.SetIndex([0, 0, 0])
         
         extracted_2d = extractor.Execute(extracted_3d)
-        sitk.WriteImage(extracted_2d, r"D:\dataset\TEECT_data\ct\temp.nii.gz", useCompression=True)
-        extracted_2d = sitk.ReadImage(r"D:\dataset\TEECT_data\ct\temp.nii.gz")
-        # 如果需要提取mask且mask存在
+        orthogonalized_direction = self.orthogonalize_direction_2d(extracted_2d.GetDirection())
+        extracted_2d.SetDirection(orthogonalized_direction)
+        # sitk.WriteImage(extracted_2d, r"D:\dataset\TEECT_data\ct\temp.nii.gz", useCompression=True)
+        # extracted_2d = sitk.ReadImage(r"D:\dataset\TEECT_data\ct\temp.nii.gz")
         if extract_mask and self.ct_mask is not None:
             # 使用相同的resampler参数提取mask
             resampler_mask = sitk.ResampleImageFilter()
@@ -615,11 +703,12 @@ class TwoD_ThreeD_Registration:
             
             # 降维到2D
             mask_2d = extractor.Execute(mask_3d)
-            sitk.WriteImage(mask_2d, r"D:\dataset\TEECT_data\ct\temp.nii.gz", useCompression=True)
-            mask_2d = sitk.ReadImage(r"D:\dataset\TEECT_data\ct\temp.nii.gz")
+            mask_2d.SetDirection(orthogonalized_direction)
+            # sitk.WriteImage(mask_2d, r"D:\dataset\TEECT_data\ct\temp.nii.gz", useCompression=True)
+            # mask_2d = sitk.ReadImage(r"D:\dataset\TEECT_data\ct\temp.nii.gz")
             return extracted_2d, mask_2d
         
-        return extracted_2d
+        return extracted_2d, None
 
             
     def compute_chamfer_distance(
@@ -752,8 +841,6 @@ class TwoD_ThreeD_Registration:
         """混合边缘相似度：截断对称Chamfer + 质心 + 主轴方向，自动归一化权重。"""
         if len(ct_edge_points) < 5 or len(us_edge_points) < 5:
             return 1e6
-
-        from scipy.spatial import cKDTree
 
         # 固定参考尺度：优先使用US视野物理对角线，避免大偏差时对角线同步变大导致饱和
         try:
@@ -989,8 +1076,7 @@ class TwoD_ThreeD_Registration:
         Returns:
             total_cost: 加权总代价
         """
-        from scipy.spatial import cKDTree
-        
+
         if label_weights is None:
             # 默认权重：所有标签等权
             label_weights = {label: 1.0 for label in ct_label_points.keys()}
@@ -1093,633 +1179,7 @@ class TwoD_ThreeD_Registration:
             return 1e6
 
         return total_cost / total_weight
-
-    def objective_function(self, params: np.ndarray) -> float:
-        """
-        目标函数：返回边缘点云之间的Chamfer距离（越小越好）
-        """
-        alpha, beta, gamma, tx, ty, tz, sx, sy = params
-        
-        try:
-            # 提取CT切片和mask
-            if self.ct_mask is not None:
-                extracted_slice, mask_slice = self.extract_slice_from_volume(
-                    alpha, beta, gamma, tx, ty, tz, sx, sy, extract_mask=True
-                )
-            else:
-                extracted_slice = self.extract_slice_from_volume(
-                    alpha, beta, gamma, tx, ty, tz, sx, sy, extract_mask=False
-                )
-                mask_slice = None
-            
-            # 从CT切片提取边缘点（优先使用mask轮廓）
-            if mask_slice is not None:
-                ct_edge_points = self.extract_edge_points(
-                    extracted_slice, mask=mask_slice, 
-                    method='mask_contour', subsample=5
-                )
-            else:
-                ct_edge_points = self.extract_edge_points(
-                    extracted_slice, mask=None, 
-                    method='canny', subsample=5
-                )
-            
-            # 从超声图像提取边缘点
-            # 如果超声也有mask，可以从mask提取；否则用边缘检测
-            us_edge_points = self.extract_edge_points(
-                self.ultrasound_2d, mask=self.us_mask,  # 如果有超声mask，替换为 mask=self.us_mask
-                method='canny', subsample=5
-            )
-            
-            # 检查边缘点数量
-            if len(ct_edge_points) < 10 or len(us_edge_points) < 10:
-                print(f"    ⚠️ 边缘点过少: CT={len(ct_edge_points)}, US={len(us_edge_points)}")
-                return 1e6
-            
-            # 计算Chamfer距离
-            # chamfer_dist = self.compute_chamfer_distance(
-            #     ct_edge_points, us_edge_points, bidirectional=True
-            # )
-            # chamfer_dist = self.compute_principal_axis_distance(
-            # ct_edge_points, us_edge_points,
-            # weight_translation=0.5,  # 平移权重
-            # weight_rotation=0.5    # 旋转权重
-            # )
-            # 计算基于边缘距离图的loss（越小越好）
-            chamfer_dist = self.compute_edge_distance_map_loss(
-                ct_edge_points, us_edge_points, grid_spacing=1.0
-            )
-            # 记录历史
-            self.optimization_history.append({
-                'params': params.copy(),
-                'chamfer_dist': chamfer_dist,
-                'n_ct_points': len(ct_edge_points),
-                'n_us_points': len(us_edge_points)
-            })
-            
-            # 打印当前最优值
-            if len(self.optimization_history) % 10 == 0:
-                print(f"  迭代 {len(self.optimization_history)}: Chamfer={chamfer_dist:.3f}mm, "
-                    f"角度=({np.degrees(alpha):.1f}°, {np.degrees(beta):.1f}°, {np.degrees(gamma):.1f}°), "
-                    f"CT点={len(ct_edge_points)}, US点={len(us_edge_points)},"
-                    f"平移=({tx:.1f}, {ty:.1f}, {tz:.1f}),"
-                    f"缩放=({sx:.1f}, {sy:.1f})")
-            
-            # 返回Chamfer距离（最小化）
-            return chamfer_dist
-            
-        except Exception as e:
-            print(f"  计算失败: {e}")
-            import traceback
-            traceback.print_exc()
-            return 1e6
-
-    def objective_normalized(self,params_norm):
-        """接受归一化参数，内部转换为真实参数"""
-        # 反归一化
-        params_real = params_norm.copy()
-        params_real = params_norm * self.param_scales
-        # params_real[6:] = params_norm[6:] * self.param_scales[6:] + 1.0
-        
-        # 调用原始目标函数
-        return self.objective_function(params_real)
-
-
-    def register(
-        self,
-        initial_params: Optional[np.ndarray] = None,
-        method: str = 'powell',
-        bounds: Optional[list] = None,
-        max_iterations: int = 200
-    ) -> Tuple[np.ndarray, dict]:
-        """
-        执行配准
-        
-        Args:
-            initial_params: 初始参数 [alpha, beta, gamma, tx, ty, tz, sx, sy]
-                          如果为None，则从粗略位置开始
-            method: 优化方法 ('powell', 'nelder-mead', 'de' for differential evolution)
-            bounds: 参数边界 [(min, max), ...] for each parameter
-            max_iterations: 最大迭代次数
-        
-        Returns:
-            best_params: 最优参数
-            result_dict: 结果字典
-        """
-        print(f"\n开始2D-3D配准...")
-        print(f"  优化方法: {method}")
-        
-        # 默认初始参数
-        if initial_params is None:
-            initial_params = np.array([
-                np.radians(0), np.radians(0), np.radians(0),  # 角度
-                0.0, 0.0, 0.0,  # 平移
-                1.0, 1.0        # 缩放
-            ])
-        
-        # ===== 定义参数尺度 =====
-        # 将所有参数归一化到相似的数量级（例如都在[-1, 1]范围内）
-        # self.param_scales = np.array([
-        #     np.pi * 50/180,   # alpha: ±30° ≈ ±0.52 rad → 归一化到 ±1
-        #     np.pi * 50/180,   # beta: ±30°
-        #     np.pi,     # gamma: ±180° ≈ ±3.14 rad → 归一化到 ±1
-        #     50.0,      # tx: ±50mm → 归一化到 ±1
-        #     50.0,      # ty: ±50mm
-        #     50.0,      # tz: ±50mm
-        # ])
-        self.param_scales = np.array([
-            1.0,   # alpha: ±30° ≈ ±0.52 rad → 归一化到 ±1
-            1.0,   # beta: ±30°
-            1.0,     # gamma: ±180° ≈ ±3.14 rad → 归一化到 ±1
-            10.0,      # tx: ±50mm → 归一化到 ±1
-            10.0,      # ty: ±50mm
-            10.0,      # tz: ±50mm
-        ])
-        # self.param_scales = np.array([
-        #     0.1*1.0,   # alpha: ±30° ≈ ±0.52 rad → 归一化到 ±1
-        #     0.1*1.0,   # beta: ±30°
-        #     0.1*1.0,     # gamma: ±180° ≈ ±3.14 rad → 归一化到 ±1
-        #     1.0,      # tx: ±50mm → 归一化到 ±1
-        #     1.0,      # ty: ±50mm
-        #     1.0,      # tz: ±50mm
-        # ])
-
-        # 归一化初始参数
-        initial_params_norm = initial_params.copy()
-        initial_params_norm = initial_params / self.param_scales
-        
-        print(f"  原始初始参数: {initial_params}")
-        print(f"  归一化初始参数: {initial_params_norm}")
-        
-        # 归一化边界
-        if bounds is None:
-            # 默认边界（原始空间）
-            bounds_original = [
-                (-np.pi * 50/180, np.pi* 50/180),   # alpha
-                (-np.pi* 50/180, np.pi* 50/180),   # beta
-                (-np.pi, np.pi),       # gamma
-                (-50, 50),             # tx
-                (-50, 50),             # ty
-                (-50, 50),             # tz
-                (0.8, 1.2),            # sx
-                (0.8, 1.2)             # sy
-            ]
-        else:
-            bounds_original = bounds
-        
-        # 转换为归一化边界
-        bounds_norm = []
-        for i, (lb, ub) in enumerate(bounds_original):
-            if i < 6:
-                # 角度和平移
-                lb_norm = lb / self.param_scales[i]
-                ub_norm = ub / self.param_scales[i]
-            else:
-                # 缩放
-                lb_norm = lb
-                ub_norm = ub
-            bounds_norm.append((lb_norm, ub_norm))
-        start_time = time.time()
-        inner_optimizer_params = dict(inner_optimizer_params or {})
-        
-        method_lower = method.lower()
-        # 根据方法选择优化器
-        if method_lower == 'de':
-            # 差分进化（全局优化）
-            print("  使用差分进化算法（全局搜索）...")
-            result = differential_evolution(
-                self.objective_normalized,
-                bounds=bounds_norm,
-                maxiter=max_iterations,
-                popsize=15,
-                atol=0.001,
-                tol=0.001,
-                workers=1
-            )
-            best_params_norm = result.x
-            final_mi = -result.fun
-
-        elif method_lower in {'cg', 'conjugate_gradient'}:
-            print("  使用共轭梯度算法（有限差分梯度）...")
-            result = self.conjugate_gradient_optimize(
-                objective_func=self.objective_normalized,
-                x0=initial_params_norm,
-                bounds=bounds_norm,
-                max_iter=max_iterations,
-                tol=1e-4
-            )
-            best_params_norm = result['x']
-            final_mi = -result['fun']
-
-        else:
-            # 局部优化
-            print(f"  使用{method}算法（局部优化）...")
-            result = minimize(
-                self.objective_normalized,
-                x0=initial_params_norm,
-                method=method,
-                bounds=bounds_norm if method in ['l-bfgs-b', 'tnc', 'slsqp'] else None,
-                options={'maxiter': max_iterations,
-                'maxfev':max_iterations*1}
-            )
-            # 反归一化最优参数
-            best_params_norm = result.x
-            final_mi = -result.fun
-
-        best_params = np.asarray(best_params_norm) * self.param_scales
-        
-        elapsed_time = time.time() - start_time
-        
-        # 保存最优参数
-        self.best_params = best_params
-        
-        # 提取最优切片
-        best_slice = self.extract_slice_from_volume(*best_params)
-        
-        # 准备结果
-        result_dict = {
-            'best_params': best_params,
-            'alpha_deg': np.degrees(best_params[0]),
-            'beta_deg': np.degrees(best_params[1]),
-            'gamma_deg': np.degrees(best_params[2]),
-            'translation': best_params[3:6],
-            'scaling': best_params[6:8],
-            'final_mi': final_mi,
-            'num_iterations': len(self.optimization_history),
-            'elapsed_time': elapsed_time,
-            'best_slice': best_slice
-        }
-        
-        print(f"\n配准完成！")
-        print(f"  迭代次数: {result_dict['num_iterations']}")
-        print(f"  最终MI: {final_mi:.4f}")
-        print(f"  旋转角度: α={result_dict['alpha_deg']:.2f}°, "
-              f"β={result_dict['beta_deg']:.2f}°, γ={result_dict['gamma_deg']:.2f}°")
-        print(f"  平移: ({best_params[3]:.2f}, {best_params[4]:.2f}, {best_params[5]:.2f}) mm")
-        print(f"  缩放: ({best_params[6]:.3f}, {best_params[7]:.3f})")
-        print(f"  耗时: {elapsed_time:.1f}秒")
-        
-        return best_params, result_dict
-    
-    def register_icp(
-        self,
-        initial_params: Optional[np.ndarray] = None,
-        max_iterations: int = 50,
-        tolerance: float = 1e-4,
-        max_correspondence_dist: float = 50.0,
-        inner_opt_iterations: int = 50,
-        min_iterations: int = 10,
-        use_gps: bool = True
-    ) -> Tuple[np.ndarray, dict]:
-        """
-        使用ICP风格的迭代优化进行2D-3D配准
-        
-        Args:
-            initial_params: 初始参数 [alpha, beta, gamma, tx, ty, tz, sx, sy]
-            max_iterations: 最大ICP外层迭代次数
-            tolerance: 收敛阈值（平均距离变化）
-            max_correspondence_dist: 最大对应点距离阈值（mm）
-            inner_opt_iterations: 每次ICP迭代内部的优化迭代次数
-            min_iterations: 最小迭代次数，避免过早停止
-            use_gps: 是否使用广义模式搜索（GPS），False则使用Powell方法
-        
-        Returns:
-            best_params: 最优参数
-            result_dict: 结果字典
-        """
-        print(f"\n开始2D-3D ICP配准...")
-        print(f"  最大迭代次数: {max_iterations}")
-        print(f"  最大对应距离: {max_correspondence_dist}mm")
-        
-        from scipy.spatial import cKDTree
-        
-        start_time = time.time()
-        
-        # 默认初始参数
-        if initial_params is None:
-            initial_params = np.array([
-                np.radians(0), np.radians(0), np.radians(0),  # 角度
-                0.0, 0.0, 0.0,  # 平移
-                1.0, 1.0        # 缩放
-            ])
-        self.param_scales = np.array([
-            1.0,   # alpha: ±30° ≈ ±0.52 rad → 归一化到 ±1
-            1.0,   # beta: ±30°
-            1.0,     # gamma: ±180° ≈ ±3.14 rad → 归一化到 ±1
-            10.0,      # tx: ±50mm → 归一化到 ±1
-            10.0,      # ty: ±50mm
-            10.0,      # tz: ±50mm
-            1.0,      # sx: ±1
-            1.0,      # sy: ±1
-        ])
-        initial_params_norm = initial_params.copy()
-        initial_params_norm = initial_params / self.param_scales
-
-        # params = initial_params.copy()
-        params = initial_params_norm.copy()
-        self.optimization_history = []
-        
-        # 提取超声边缘点（固定，只需提取一次）
-        print("  提取超声边缘点...")
-        us_edge_points = self.extract_edge_points(
-            self.ultrasound_2d, 
-            mask=self.us_mask if hasattr(self, 'us_mask') else None,
-            method='canny', 
-            subsample=3  # 更密集的采样
-        )
-        
-        if len(us_edge_points) < 10:
-            raise ValueError(f"超声边缘点过少: {len(us_edge_points)}")
-        
-        print(f"  超声边缘点数: {len(us_edge_points)}")
-        
-        prev_mean_dist = float('inf')
-        best_params = params.copy()
-        best_cost = float('inf')
-        
-        # 保存初始边缘点（用于可视化）
-        initial_ct_edge_points = None
-        initial_params_saved = initial_params.copy()
-        # ICP主循环
-        for icp_iter in range(max_iterations):
-            print(f"\n--- ICP迭代 {icp_iter + 1}/{max_iterations} ---")
-            
-            # 步骤1: 提取当前参数对应的CT切片边缘点 
-            # alpha, beta, gamma, tx, ty, tz, sx, sy = params
-            alpha, beta, gamma, tx, ty, tz, sx, sy = params * self.param_scales
-            
-            try:
-                if self.ct_mask is not None:
-                    extracted_slice, mask_slice = self.extract_slice_from_volume(
-                        alpha, beta, gamma, tx, ty, tz, sx, sy, extract_mask=True
-                    )
-                    ct_edge_points = self.extract_edge_points(
-                        extracted_slice, mask=mask_slice, 
-                        method='mask_contour', subsample=3
-                    )
-                else:
-                    extracted_slice = self.extract_slice_from_volume(
-                        alpha, beta, gamma, tx, ty, tz, sx, sy, extract_mask=False
-                    )
-                    ct_edge_points = self.extract_edge_points(
-                        extracted_slice, mask=None, 
-                        method='canny', subsample=3
-                    )
-            except Exception as e:
-                print(f"  ⚠️ 提取切片失败: {e}")
-                break
-            
-            if len(ct_edge_points) < 10:
-                print(f"  ⚠️ CT边缘点过少: {len(ct_edge_points)}")
-                break
-            
-            # 保存第一次迭代的CT边缘点（初始状态）
-            if icp_iter == 0:
-                initial_ct_edge_points = ct_edge_points.copy()
-            
-            # 步骤2: 建立点对应关系（CT点 -> US点的最近邻）
-            us_tree = cKDTree(us_edge_points)
-            distances, indices = us_tree.query(ct_edge_points)
-            
-            # 不使用距离筛选，使用所有边缘点
-            num_valid = len(ct_edge_points)
-            
-            if num_valid < 10:
-                print(f"  ⚠️ 边缘点过少: {num_valid}")
-                break
-            
-            ct_points_valid = ct_edge_points
-            us_points_valid = us_edge_points[indices]
-            valid_distances = distances
-            mean_dist = np.mean(valid_distances)
-            
-            print(f"  CT边缘点数: {len(ct_edge_points)}")
-            print(f"  对应点对数: {num_valid}")
-            print(f"  平均对应距离: {mean_dist:.3f}mm")
-            print(f"  当前参数: α={np.degrees(alpha):.1f}°, β={np.degrees(beta):.1f}°, "
-                  f"γ={np.degrees(gamma):.1f}°, t=({tx:.1f},{ty:.1f},{tz:.1f})mm")
-            
-            # 步骤3: 基于固定的点对应关系优化参数
-            # 定义局部代价函数：给定固定的目标点us_points_valid，优化参数
-            def correspondence_cost(p):
-                """给定参数，提取CT边缘，计算与固定US目标点的距离"""
-                # alpha_, beta_, gamma_, tx_, ty_, tz_, sx_, sy_ = p
-                alpha_, beta_, gamma_, tx_, ty_, tz_, sx_, sy_ = p * self.param_scales
-                try:
-                    if self.ct_mask is not None:
-                        slice_, mask_ = self.extract_slice_from_volume(
-                            alpha_, beta_, gamma_, tx_, ty_, tz_, sx_, sy_, extract_mask=True
-                        )
-                        ct_pts = self.extract_edge_points(
-                            slice_, mask=mask_, method='mask_contour', subsample=3
-                        )
-                    else:
-                        slice_ = self.extract_slice_from_volume(
-                            alpha_, beta_, gamma_, tx_, ty_, tz_, sx_, sy_, extract_mask=False
-                        )
-                        ct_pts = self.extract_edge_points(
-                            slice_, mask=None, method='canny', subsample=3
-                        )
-                    
-                    if len(ct_pts) < 10:
-                        return 1e6
-                    # === 双向Chamfer距离（不使用距离筛选）===
-                    # 方向1: CT点 -> US点的平均距离
-                    tree_us = cKDTree(us_points_valid)
-                    dists_ct_to_us, _ = tree_us.query(ct_pts)
-                    
-                    if len(dists_ct_to_us) < 5:
-                        return 1e6
-                    mean_dist_ct_to_us = np.mean(dists_ct_to_us)
-                    
-                    # 方向2: US点 -> CT点的平均距离
-                    tree_ct = cKDTree(ct_pts)
-                    dists_us_to_ct, _ = tree_ct.query(us_points_valid)
-                    
-                    if len(dists_us_to_ct) < 5:
-                        return 1e6
-                    mean_dist_us_to_ct = np.mean(dists_us_to_ct)
-                    
-                    # 双向平均（对称Chamfer距离）
-                    chamfer_dist = (mean_dist_ct_to_us + mean_dist_us_to_ct) / 2.0
-                    
-                    return chamfer_dist
-                    
-                except Exception as e:
-                    return 1e6
-            
-            # 使用优化器优化参数
-            if use_gps:
-                print(f"  使用GPS优化参数（最大迭代{inner_opt_iterations}次）...")
-                
-                # 定义归一化边界
-                bounds_norm = [
-                    (params[0]-np.pi * 50/180 / self.param_scales[0], params[0]+np.pi * 50/180 / self.param_scales[0]),   # alpha
-                    (params[1]-np.pi * 50/180 / self.param_scales[1], params[1]+np.pi * 50/180 / self.param_scales[1]),   # beta
-                    (params[2]-np.pi / self.param_scales[2], params[2]+np.pi / self.param_scales[2]),       # gamma
-                    (params[3]-50 / self.param_scales[3], params[3]+50 / self.param_scales[3]),             # tx
-                    (params[4]-50 / self.param_scales[4], params[4]+50 / self.param_scales[4]),             # ty
-                    (params[5]-50 / self.param_scales[5], params[5]+50 / self.param_scales[5]),             # tz
-                    (0.8, 1.2),            # sx
-                    (0.8, 1.2)             # sy
-                ]
-                
-                gps_step_scales = np.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0], dtype=float)
-                gps_contraction = np.array([0.9, 0.9, 0.9, 0.6, 0.6, 0.6, 0.75, 0.75], dtype=float)
-                gps_expansion = np.array([1.1, 1.1, 1.1, 1.3, 1.3, 1.3, 1.05, 1.05], dtype=float)
-
-                result = self.generalized_pattern_search(
-                    correspondence_cost,
-                    x0=params,
-                    bounds=bounds_norm,
-                    max_iter=inner_opt_iterations,
-                    tol=1e-6,
-                    initial_step=0.1,  # 初始步长（归一化空间）
-                    expansion_factor=2.0,
-                    contraction_factor=0.5,
-                    step_scales=gps_step_scales,
-                    per_dim_contraction=gps_contraction,
-                    per_dim_expansion=gps_expansion,
-                    min_step=1e-8
-                )
-                
-                print(f"    GPS评估次数: {result['nfev']}")
-                print(f"    GPS最终步长: {result['final_step_size']:.2e}")
-                
-            else:
-                print(f"  使用坐标轮换搜索优化参数（内部迭代{inner_opt_iterations}次）...")
-                bounds_norm = [
-                    (params[0]-np.pi * 50/180 / self.param_scales[0], params[0]+np.pi * 50/180 / self.param_scales[0]),
-                    (params[1]-np.pi * 50/180 / self.param_scales[1], params[1]+np.pi * 50/180 / self.param_scales[1]),
-                    (params[2]-np.pi / self.param_scales[2], params[2]+np.pi / self.param_scales[2]),
-                    (params[3]-50 / self.param_scales[3], params[3]+50 / self.param_scales[3]),
-                    (params[4]-50 / self.param_scales[4], params[4]+50 / self.param_scales[4]),
-                    (params[5]-50 / self.param_scales[5], params[5]+50 / self.param_scales[5]),
-                    (0.8, 1.2),
-                    (0.8, 1.2)
-                ]
-                coord_steps = np.array([0.05, 0.05, 0.05, 1, 1, 1, 0.02, 0.02], dtype=float)
-                result = self.coordinate_cyclic_search(
-                    correspondence_cost,
-                    x0=params,
-                    bounds=bounds_norm,
-                    max_iter=inner_opt_iterations,
-                    initial_step=0.2,
-                    per_dim_initial_step=coord_steps,
-                    step_decay=0.6,
-                    min_step=1e-4
-                )
-            
-            # 更新参数
-            params = result['x'] if isinstance(result, dict) else result.x
-            current_cost = result['fun'] if isinstance(result, dict) else result.fun
-            
-            print(f"  优化后代价: {current_cost:.3f}mm")
-            
-            # 获取优化成功状态
-            if isinstance(result, dict):
-                opt_success = result.get('success', True)
-            else:
-                opt_success = result.success if hasattr(result, 'success') else True
-            print(f"  优化成功: {opt_success}")
-            
-            # 记录历史
-            self.optimization_history.append({
-                'icp_iteration': icp_iter + 1,
-                'params': params.copy(),
-                'mean_distance': mean_dist,
-                'num_correspondences': num_valid,
-                'optimized_cost': current_cost
-            })
-            
-            # 更新最优参数
-            if current_cost < best_cost:
-                best_cost = current_cost
-                best_params = params.copy()
-                print(f"  ✓ 更新最优参数")
-            
-            # 步骤4: 检查收敛
-            dist_change = abs(prev_mean_dist - mean_dist)
-            
-            print(f"\n  [收敛检查]")
-            print(f"    当前平均距离: {mean_dist:.3f}mm")
-            print(f"    上次平均距离: {prev_mean_dist:.3f}mm")
-            print(f"    距离变化: {dist_change:.3f}mm (阈值: {tolerance}mm)")
-            print(f"    当前迭代: {icp_iter + 1}/{max_iterations} (最小: {min_iterations})")
-            
-            # 收敛条件：距离变化小于阈值 且 达到最小迭代次数
-            if dist_change < tolerance and icp_iter >= min_iterations:
-                print(f"\n{'='*60}")
-                print(f"✓ ICP收敛！")
-                print(f"  距离变化 {dist_change:.4f}mm < {tolerance}mm")
-                print(f"  完成 {icp_iter+1} 次迭代")
-                print(f"{'='*60}")
-                break
-            elif dist_change < tolerance:
-                print(f"    ⚠️ 距离变化小于阈值，但未达到最小迭代次数 ({icp_iter+1}/{min_iterations})")
-            
-            # 更新前一次的距离（重要！）
-            prev_mean_dist = mean_dist
-        
-        elapsed_time = time.time() - start_time
-        
-        # 保存最优参数
-        self.best_params = best_params
-        
-        # 提取最优切片和最终边缘点
-        # best_slice = self.extract_slice_from_volume(*best_params)
-        best_slice = self.extract_slice_from_volume(*best_params * self.param_scales)
-        
-        # 提取最终的CT边缘点
-        try:
-            if self.ct_mask is not None:
-                final_slice, final_mask = self.extract_slice_from_volume(
-                    *best_params * self.param_scales, extract_mask=True
-                )
-                final_ct_edge_points = self.extract_edge_points(
-                    final_slice, mask=final_mask, 
-                    method='mask_contour', subsample=3
-                )
-            else:
-                final_slice = self.extract_slice_from_volume(*best_params * self.param_scales, extract_mask=False)
-                final_ct_edge_points = self.extract_edge_points(
-                    final_slice, mask=None, 
-                    method='canny', subsample=3
-                )
-        except:
-            final_ct_edge_points = None
-        
-        # 准备结果
-        result_dict = {
-            'best_params': best_params,
-            'initial_params': initial_params_saved,
-            'alpha_deg': np.degrees(best_params[0] * self.param_scales[0]),
-            'beta_deg': np.degrees(best_params[1] * self.param_scales[1]),
-            'gamma_deg': np.degrees(best_params[2] * self.param_scales[2]),
-            'translation': best_params[3:6] * self.param_scales[3:6],
-            'scaling': best_params[6:8] * self.param_scales[6:8],
-            'final_cost': best_cost,
-            'num_iterations': len(self.optimization_history),
-            'elapsed_time': elapsed_time,
-            'best_slice': best_slice,
-            'us_edge_points': us_edge_points,
-            'initial_ct_edge_points': initial_ct_edge_points,
-            'final_ct_edge_points': final_ct_edge_points
-        }
-        
-        print(f"\n{'='*60}")
-        print(f"ICP配准完成！")
-        print(f"  总迭代次数: {result_dict['num_iterations']}")
-        print(f"  最终代价: {best_cost:.3f}mm")
-        print(f"  旋转角度: α={result_dict['alpha_deg']:.2f}°, "
-              f"β={result_dict['beta_deg']:.2f}°, γ={result_dict['gamma_deg']:.2f}°")
-        print(f"  平移: ({best_params[3] * self.param_scales[3]:.2f}, {best_params[4] * self.param_scales[4]:.2f}, {best_params[5] * self.param_scales[5]:.2f}) mm")
-        print(f"  缩放: ({best_params[6] * self.param_scales[6]:.3f}, {best_params[7] * self.param_scales[7]:.3f})")
-        print(f"  耗时: {elapsed_time:.1f}秒")
-        print(f"{'='*60}\n")
-        
-        return best_params, result_dict
-    
+   
     def visualize_result(
         self,
         result_dict: dict,
@@ -1826,8 +1286,8 @@ class TwoD_ThreeD_Registration:
         plt.close()
         
         print(f"\n✓ Visualization saved: {vis_path}")
-        print(f"  US physical range: X=[{us_extent[0]:.1f}, {us_extent[1]:.1f}]mm, Y=[{us_extent[3]:.1f}, {us_extent[2]:.1f}]mm")
-        print(f"  CT physical range: X=[{slice_extent[0]:.1f}, {slice_extent[1]:.1f}]mm, Y=[{slice_extent[3]:.1f}, {slice_extent[2]:.1f}]mm")
+        # print(f"  US physical range: X=[{us_extent[0]:.1f}, {us_extent[1]:.1f}]mm, Y=[{us_extent[3]:.1f}, {us_extent[2]:.1f}]mm")
+        # print(f"  CT physical range: X=[{slice_extent[0]:.1f}, {slice_extent[1]:.1f}]mm, Y=[{slice_extent[3]:.1f}, {slice_extent[2]:.1f}]mm")
     
     def visualize_correspondences(
         self,
@@ -1847,7 +1307,6 @@ class TwoD_ThreeD_Registration:
             show_lines: 是否显示对应关系连线
             subsample_ratio: 用于显示连线的点采样比例（避免过于密集）
         """
-        from scipy.spatial import cKDTree
         
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
@@ -2044,8 +1503,367 @@ class TwoD_ThreeD_Registration:
                        f"(Δ={best_params[i]-initial_params[i]:.4f})\n")
         
         print(f"✓ Statistics report saved: {stats_path}")
+        
+    def evaluate_metric(self, params, labels, us_label_points):
+        # 步骤1: 提取当前参数对应的CT切片各标签边缘点
+        alpha, beta, gamma, tx, ty, tz, sx, sy = params * self.param_scales
+        
+        print(f"  评估当前参数结果...")
+        print(f"  当前参数:")
+        print(f"    旋转: α={np.degrees(alpha):.2f}°, β={np.degrees(beta):.2f}°, γ={np.degrees(gamma):.2f}°")
+        print(f"    平移: tx={tx:.2f}mm, ty={ty:.2f}mm, tz={tz:.2f}mm")
+        print(f"    缩放: sx={sx:.2f}, sy={sy:.2f}")
+        
+        try:
+            extracted_slice, mask_slice = self.extract_slice_from_volume(
+                alpha, beta, gamma, tx, ty, tz, sx, sy, extract_mask=True
+            )
+            
+            ct_label_points = self.extract_edge_points_by_label(
+                extracted_slice,
+                mask_slice,
+                labels=labels,
+                subsample=3
+            )
+        except Exception as e:
+            print(f"  ⚠️ 提取切片失败: {e}")
+        
+        if len(ct_label_points) == 0:
+            print(f"  ⚠️ CT切片中没有有效的标签边缘点")
+        
+        # # 保存初始状态
+        # if icp_iter == 0:
+        #     initial_ct_label_points = {k: v.copy() for k, v in ct_label_points.items()}
+        
+        # 步骤2: 计算各标签的平均距离（用于收敛判断）
+        label_mean_dists = {}
+        total_valid_points = 0
+        
+        for label_id in ct_label_points.keys():
+            if label_id not in us_label_points:
+                continue
+            
+            ct_pts = ct_label_points[label_id]
+            us_pts = us_label_points[label_id]
+            
+            # 建立对应关系（不使用距离筛选）
+            tree = cKDTree(us_pts)
+            distances, _ = tree.query(ct_pts)
+            
+            if len(distances) > 0:
+                label_mean_dists[label_id] = np.mean(distances)
+                total_valid_points += len(distances)
+        
+        if len(label_mean_dists) == 0:
+            print(f"  ⚠️ 没有有效的标签对应")
+        
+        # 全局平均距离（用于收敛判断）
+        mean_dist = np.mean(list(label_mean_dists.values()))
+        
+        print(f"\n  [各标签对应距离]")
+        for label_id, dist in label_mean_dists.items():
+            print(f"    标签 {label_id} ({CHAMBER_LABELS.get(label_id, 'Unknown')}): {dist:.3f}mm")
+        print(f"  全局平均距离: {mean_dist:.3f}mm")
+        print(f"  有效对应点总数: {total_valid_points}")
+        return mean_dist, label_mean_dists
 
-    def register_icp_multi_label(
+    def correspondence_cost(self, p):
+        """多标签对应代价函数"""
+        alpha_, beta_, gamma_, tx_, ty_, tz_, sx_, sy_ = p * self.param_scales
+        try:
+            slice_, mask_ = self.extract_slice_from_volume(
+                alpha_, beta_, gamma_, tx_, ty_, tz_, sx_, sy_, extract_mask=True
+            )
+            ct_pts_dict = self.extract_edge_points_by_label(
+                slice_, mask_, labels=self.labels, subsample=3
+            )
+            
+            if len(ct_pts_dict) == 0:
+                return 1e6
+            
+            # 计算多标签代价
+            # cost = self.compute_multi_label_correspondence_cost(
+            #     ct_pts_dict,
+            #     us_label_points,
+            #     max_correspondence_dist,
+            #     label_weights
+            # )
+            
+            # 计算多标签基于距离图的代价：
+            cost = self.compute_multi_label_distance_map_loss(
+                ct_pts_dict,
+                self.us_label_points,
+                label_weights=self.label_weights,
+                grid_spacing=1.0
+            )
+            
+            return cost
+            
+        except Exception as e:
+            return 1e6
+
+    def register_multi_label(
+        self,
+        initial_params: Optional[np.ndarray] = None,
+        max_iterations: int = 50,
+        tolerance: float = 1e-4,
+        max_correspondence_dist: float = 50.0,
+        inner_opt_iterations: int = 50,
+        # min_iterations: int = 10,
+        inner_optimizer: str = 'gps',
+        inner_optimizer_params: Optional[Dict[str, float]] = {},
+        labels: List[int] = [1, 2, 3, 4],
+        label_weights: Optional[Dict[int, float]] = None
+    ) -> Tuple[np.ndarray, dict]:
+        """
+        使用多标签距离图进行2D-3D配准
+        
+        Args:
+            initial_params: 初始参数 [alpha, beta, gamma, tx, ty, tz, sx, sy]
+            max_iterations: 最大ICP外层迭代次数
+            tolerance: 收敛阈值（平均距离变化）
+            max_correspondence_dist: 最大对应点距离阈值（mm）
+            inner_opt_iterations: 每次ICP迭代内部的优化迭代次数
+            min_iterations: 最小迭代次数，避免过早停止
+            inner_optimizer: 内层优化器类型（'gps'、'coordinate'、'conjugate_gradient'）
+            inner_optimizer_params: 内层优化器参数（可选）
+            labels: 要使用的标签列表
+            label_weights: 各标签的权重（可选）
+        
+        Returns:
+            best_params: 最优参数
+            result_dict: 结果字典
+        """
+        print(f"\n{'='*80}")
+        print(f"\n开始2D-3D 多标签ICP配准...")
+        print(f"\n{'='*80}")
+        self.labels = labels
+        self.label_weights = label_weights
+        print(f"  使用标签: {self.labels}")
+        if self.label_weights:
+            print(f"  标签权重: {self.label_weights}")
+        
+       
+        start_time = time.time()
+        
+        # 默认初始参数
+        if initial_params is None:
+            initial_params = np.array([
+                np.radians(0), np.radians(0), np.radians(0),
+                0.0, 0.0, 0.0,
+                1.0, 1.0
+            ])
+        
+        # 参数归一化
+        self.param_scales = np.array([
+            1.0, 1.0, 1.0,      # 角度
+            1.0, 1.0, 1.0,   # 平移
+            1.0, 1.0            # 缩放
+        ])
+        initial_params_norm = initial_params / self.param_scales
+        params = initial_params_norm.copy()
+        self.optimization_history = []
+        bounds_norm = [
+                    (params[0]-np.pi * 50/180 / self.param_scales[0], params[0]+np.pi * 50/180 / self.param_scales[0]),
+                    (params[1]-np.pi * 50/180 / self.param_scales[1], params[1]+np.pi * 50/180 / self.param_scales[1]),
+                    (params[2]-np.pi / self.param_scales[2], params[2]+np.pi / self.param_scales[2]),
+                    (params[3]-50 / self.param_scales[3], params[3]+50 / self.param_scales[3]),
+                    (params[4]-50 / self.param_scales[4], params[4]+50 / self.param_scales[4]),
+                    (params[5]-50 / self.param_scales[5], params[5]+50 / self.param_scales[5]),
+                    (0.8, 1.2),
+                    (0.8, 1.2)
+                ]
+        # === 提取超声各标签的边缘点（固定，只提取一次）===
+        print("  提取超声各标签边缘点...")
+        self.us_label_points = self.extract_edge_points_by_label(
+            self.ultrasound_2d,
+            self.us_mask,
+            labels=self.labels,
+            subsample=3
+        )
+        
+        if len(self.us_label_points) == 0:
+            raise ValueError("US中没有有效的标签边缘点！")
+        
+        # 打印统计信息
+        total_us_points = sum(len(pts) for pts in self.us_label_points.values())
+        print(f"  US总边缘点数: {total_us_points}")
+        
+        # prev_mean_dist = float('inf')
+        self.best_params = params.copy()
+        self.best_cost = float('inf')
+        
+        # 保存初始边缘点
+        initial_ct_label_points = None
+        initial_params_saved = initial_params.copy()
+        
+
+        print(f"\n{'='*60}")
+        print(f"优化参数")
+        print(f"{'='*60}")
+        self.evaluate_metric(params, self.labels, self.us_label_points)
+        
+        # 步骤3: 优化参数
+        # 使用优化器
+        print(f"\n  [参数优化]")
+        optimizer_mode = inner_optimizer.lower()
+        if optimizer_mode == 'gps':
+            print(f"    使用GPS优化...")
+            gps_step_scales = np.array(
+                inner_optimizer_params.get('step_scales', [2.0, 2.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0]),
+                dtype=float
+            )
+            gps_contraction = np.array(
+                inner_optimizer_params.get('per_dim_contraction', [0.9, 0.9, 0.9, 0.6, 0.6, 0.6, 0.75, 0.75]),
+                dtype=float
+            )
+            gps_expansion = np.array(
+                inner_optimizer_params.get('per_dim_expansion', [1.1, 1.1, 1.1, 1.3, 1.3, 1.3, 1.05, 1.05]),
+                dtype=float
+            )
+
+            result = self.generalized_pattern_search(
+                self.correspondence_cost,
+                x0=params,
+                bounds=bounds_norm,
+                max_iter=inner_opt_iterations,
+                tol=inner_optimizer_params.get('tol', 1e-6),
+                initial_step=inner_optimizer_params.get('initial_step', 0.1),
+                expansion_factor=inner_optimizer_params.get('expansion_factor', 2.0),
+                contraction_factor=inner_optimizer_params.get('contraction_factor', 0.5),
+                step_scales=gps_step_scales,
+                per_dim_contraction=gps_contraction,
+                per_dim_expansion=gps_expansion,
+                min_step=inner_optimizer_params.get('min_step', 1e-8)
+            )
+            
+            print(f"    GPS评估次数: {result['nfev']}")
+            print(f"    GPS最终步长: {result['final_step_size']:.2e}")
+        elif optimizer_mode in {'coordinate', 'cyclic'}:
+            print(f"    使用坐标轮换搜索...")
+            coord_steps = np.array(
+                inner_optimizer_params.get('per_dim_initial_step', [0.05, 0.05, 0.05, 1, 1, 1, 0.02, 0.02]),
+                dtype=float
+            )
+            result = self.coordinate_cyclic_search(
+                self.correspondence_cost,
+                x0=params,
+                bounds=bounds_norm,
+                max_iter=inner_opt_iterations,
+                initial_step=inner_optimizer_params.get('initial_step', 0.2),
+                per_dim_initial_step=coord_steps,
+                step_decay=inner_optimizer_params.get('step_decay', 0.6),
+                min_step=inner_optimizer_params.get('min_step', 1e-4)
+            )
+
+        elif optimizer_mode in {'cg', 'conjugate_gradient'}:
+            print(f"    使用共轭梯度优化...")
+            result = self.conjugate_gradient_optimize(
+                objective_func=self.correspondence_cost,
+                x0=params,
+                bounds=bounds_norm,
+                max_iter=inner_opt_iterations,
+                tol=inner_optimizer_params.get('tol', 1e-4),
+                grad_step=inner_optimizer_params.get('grad_step', 1e-3),
+                line_search_start=inner_optimizer_params.get('line_search_start', 1.0),
+                line_search_shrink=inner_optimizer_params.get('line_search_shrink', 0.5),
+                armijo_coeff=inner_optimizer_params.get('armijo_coeff', 1e-4),
+                beta_strategy=inner_optimizer_params.get('beta_strategy', 'pr')
+            )
+            print(f"    CG评估次数: {result['nfev']}")
+            print(f"    CG状态: {result['status']}")
+        else:
+            raise ValueError(f"未知内层优化器: {inner_optimizer}")
+        
+        # 更新参数
+        # params = result['x'] if isinstance(result, dict) else result.x
+        # current_cost = result['fun'] if isinstance(result, dict) else result.fun
+        self.best_params = result['best_params'] if isinstance(result, dict) else result.best_params
+        self.best_cost = result['best_cost'] if isinstance(result, dict) else result.best_cost
+        
+        print(f"    优化后代价: {self.best_cost:.3f}mm")
+        
+        # 获取优化成功状态
+        if isinstance(result, dict):
+            opt_success = result.get('success', True)
+        else:
+            opt_success = result.success if hasattr(result, 'success') else True
+        print(f"    优化成功: {opt_success}")
+        
+        
+        # # 步骤4: 检查收敛
+        # dist_change = abs(prev_mean_dist - mean_dist)
+        
+        # print(f"\n  [收敛检查]")
+        # print(f"    距离变化: {dist_change:.3f}mm (阈值: {tolerance}mm)")
+        # print(f"    迭代: {icp_iter + 1}/{max_iterations} (最小: {min_iterations})")
+        
+        # if dist_change < tolerance and icp_iter >= min_iterations:
+        #     print(f"\n✓ 收敛！距离变化 {dist_change:.4f}mm < {tolerance}mm")
+        #     break
+        # elif dist_change < tolerance:
+        #     print(f"    ⚠️ 距离变化小于阈值，但未达到最小迭代次数 ({icp_iter+1}/{min_iterations})")
+        
+        # prev_mean_dist = mean_dist
+        
+        elapsed_time = time.time() - start_time
+        
+        # 提取最终结果
+        best_slice, _ = self.extract_slice_from_volume(*self.best_params * self.param_scales)
+        # 提取初始边缘点
+        try:
+            initial_slice, initial_mask = self.extract_slice_from_volume(
+                *initial_params_saved, extract_mask=True
+            )
+            initial_ct_label_points = self.extract_edge_points_by_label(
+                initial_slice, initial_mask, labels=self.labels, subsample=3
+            )
+        except:
+            initial_ct_label_points = None
+        # 提取最终边缘点
+        try:
+            final_slice, final_mask = self.extract_slice_from_volume(
+                *self.best_params * self.param_scales, extract_mask=True
+            )
+            final_ct_label_points = self.extract_edge_points_by_label(
+                final_slice, final_mask, labels=self.labels, subsample=3
+            )
+        except:
+            final_ct_label_points = None
+        
+        # 准备结果
+        result_dict = {
+            'best_params': self.best_params,
+            'initial_params': initial_params_saved,
+            'alpha_deg': np.degrees(self.best_params[0] * self.param_scales[0]),
+            'beta_deg': np.degrees(self.best_params[1] * self.param_scales[1]),
+            'gamma_deg': np.degrees(self.best_params[2] * self.param_scales[2]),
+            'translation': self.best_params[3:6] * self.param_scales[3:6],
+            'scaling': self.best_params[6:8] * self.param_scales[6:8],
+            'final_cost': self.best_cost,
+            'num_iterations': len(result['history']),
+            'elapsed_time': elapsed_time,
+            'best_slice': best_slice,
+            'us_label_points': self.us_label_points,
+            'initial_ct_label_points': initial_ct_label_points,
+            'final_ct_label_points': final_ct_label_points,
+            'labels': self.labels
+        }
+        
+        print(f"\n{'='*60}")
+        print(f"多标签ICP配准完成！")
+        print(f"  总迭代次数: {result_dict['num_iterations']}")
+        print(f"  最终代价: {self.best_cost:.3f}mm")
+        print(f"  旋转角度: α={result_dict['alpha_deg']:.2f}°, "
+              f"β={result_dict['beta_deg']:.2f}°, γ={result_dict['gamma_deg']:.2f}°")
+        print(f"  平移: ({result_dict['translation'][0]:.2f}, {result_dict['translation'][1]:.2f}, {result_dict['translation'][2]:.2f}) mm")
+        print(f"  缩放: ({result_dict['scaling'][0]:.3f}, {result_dict['scaling'][1]:.3f})")
+        print(f"  耗时: {elapsed_time:.1f}秒")
+        print(f"{'='*60}\n")
+        
+        return self.best_params, result_dict
+
+    def register_icp_multi_label_org(
         self,
         initial_params: Optional[np.ndarray] = None,
         max_iterations: int = 50,
@@ -2082,8 +1900,6 @@ class TwoD_ThreeD_Registration:
         if label_weights:
             print(f"  标签权重: {label_weights}")
         
-        from scipy.spatial import cKDTree
-        
         start_time = time.time()
         
         # 默认初始参数
@@ -2115,18 +1931,18 @@ class TwoD_ThreeD_Registration:
                 ]
         # === 提取超声各标签的边缘点（固定，只提取一次）===
         print("  提取超声各标签边缘点...")
-        us_label_points = self.extract_edge_points_by_label(
+        self.us_label_points = self.extract_edge_points_by_label(
             self.ultrasound_2d,
             self.us_mask,
-            labels=labels,
+            labels=self.labels,
             subsample=3
         )
         
-        if len(us_label_points) == 0:
+        if len(self.us_label_points) == 0:
             raise ValueError("US中没有有效的标签边缘点！")
         
         # 打印统计信息
-        total_us_points = sum(len(pts) for pts in us_label_points.values())
+        total_us_points = sum(len(pts) for pts in self.us_label_points.values())
         print(f"  US总边缘点数: {total_us_points}")
         
         prev_mean_dist = float('inf')
@@ -2149,6 +1965,7 @@ class TwoD_ThreeD_Registration:
             print(f"  当前参数:")
             print(f"    旋转: α={np.degrees(alpha):.2f}°, β={np.degrees(beta):.2f}°, γ={np.degrees(gamma):.2f}°")
             print(f"    平移: tx={tx:.2f}mm, ty={ty:.2f}mm, tz={tz:.2f}mm")
+            print(f"    缩放: sx={sx:.2f}, sy={sy:.2f}")
             
             try:
                 extracted_slice, mask_slice = self.extract_slice_from_volume(
@@ -2178,11 +1995,11 @@ class TwoD_ThreeD_Registration:
             total_valid_points = 0
             
             for label_id in ct_label_points.keys():
-                if label_id not in us_label_points:
+                if label_id not in self.us_label_points:
                     continue
                 
                 ct_pts = ct_label_points[label_id]
-                us_pts = us_label_points[label_id]
+                us_pts = self.us_label_points[label_id]
                 
                 # 建立对应关系（不使用距离筛选）
                 tree = cKDTree(us_pts)
@@ -2232,7 +2049,7 @@ class TwoD_ThreeD_Registration:
                     # 每个标签各自一张距离图，再按标签权重加权求和
                     cost = self.compute_multi_label_distance_map_loss(
                         ct_pts_dict,
-                        us_label_points,
+                        self.us_label_points,
                         label_weights=label_weights,
                         grid_spacing=1.0
                     )
@@ -2284,7 +2101,7 @@ class TwoD_ThreeD_Registration:
                     dtype=float
                 )
                 result = self.coordinate_cyclic_search(
-                    correspondence_cost,
+                    self.correspondence_cost,
                     x0=params,
                     bounds=bounds_norm,
                     max_iter=inner_opt_iterations,
@@ -2296,7 +2113,7 @@ class TwoD_ThreeD_Registration:
             elif optimizer_mode in {'cg', 'conjugate_gradient'}:
                 print(f"    使用共轭梯度优化...")
                 result = self.conjugate_gradient_optimize(
-                    objective_func=correspondence_cost,
+                    objective_func=self.correspondence_cost,
                     x0=params,
                     bounds=bounds_norm,
                     max_iter=inner_opt_iterations,
@@ -2361,7 +2178,7 @@ class TwoD_ThreeD_Registration:
         self.best_params = best_params
         
         # 提取最终结果
-        best_slice = self.extract_slice_from_volume(*best_params * self.param_scales)
+        best_slice, _ = self.extract_slice_from_volume(*best_params * self.param_scales)
         
         # 提取最终边缘点
         try:
@@ -2420,7 +2237,6 @@ class TwoD_ThreeD_Registration:
             output_dir: 输出目录
             max_correspondence_dist: 最大对应点距离（用于过滤）
         """
-        from scipy.spatial import cKDTree
         
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
@@ -2474,7 +2290,7 @@ class TwoD_ThreeD_Registration:
         initial_slice = None
         if initial_params is not None:
             try:
-                initial_slice = self.extract_slice_from_volume(*initial_params)
+                initial_slice, _ = self.extract_slice_from_volume(*initial_params)
             except Exception as e:
                 print(f"  ⚠️ Failed to extract initial slice: {e}")
         
@@ -2785,21 +2601,31 @@ def main():
     print(f"✓ 最优切片已保存: {best_slice_path}")
 
 
-def register_icp_multi_label():
+def register_multi_label():
     """主函数 - 多标签ICP配准"""
     
     # 初始化配准器
     registrator = TwoD_ThreeD_Registration()
    
-    # 加载数据（包括mask）
+    # # 加载数据（包括mask）
+    # ct_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\CT_resampled_nii\Patient_0000.nii.gz"
+    # ultrasound_path = r"D:\dataset\TEECT_data\tee_paired\Patient_0000\slice_117_t5.0_rx25_ry0_initial_transform.nii.gz"
+    # ct_mask_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\Segmentation\Patient_0000\Patient_0000_label.nii.gz"  # CT心脏mask路径
+    # us_mask_path = r"D:\dataset\TEECT_data\tee_paired\Patient_0000\slice_117_t5.0_rx25_ry0_initial_transform_1.nii.gz"
+    # output_dir = r"D:\dataset\TEECT_data\registration_results_paired\2d_3d_multi_label\Patient_0000"
+    
     ct_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\CT_resampled_nii\Patient_0036.nii.gz"
-    # ultrasound_path = r"D:\dataset\TEECT_data\tee_paired\Patient_0036\slice_117_t5.0_rx25_ry0_initial_transform.nii.gz"
     ultrasound_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\Multi-view_preprocess_images\Patient_0036\A4C1_initial_transform.nii.gz"
     ct_mask_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\Segmentation\Patient_0036\Patient_0036_label.nii.gz"  # CT心脏mask路径
-    # us_mask_path = r"D:\dataset\TEECT_data\tee_paired\Patient_0036\slice_117_t5.0_rx25_ry0_initial_transform_1.nii.gz"
     us_mask_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\Multi-view_preprocess_images\Patient_0036\A4C_seg1_initial_transform.nii.gz"
     output_dir = r"D:\dataset\TEECT_data\registration_results_paired\2d_3d_multi_label\Patient_0036"
-    
+
+    # ct_path = r"D:\dataset\CT\MM-WHS2017\ct_train\ct_train_1004_image.nii"
+    # ultrasound_path = r"D:\dataset\TEECT_data\tee\patient-1-4\slice_060_image_initial_transform.nii.gz"
+    # ct_mask_path = r"D:\dataset\CT\MM-WHS2017\ct_train\ct_train_1004_remapped_label.nii"  # CT心脏mask路径
+    # us_mask_path = r"D:\dataset\TEECT_data\tee\patient-1-4\slice_060_label_initial_transform.nii.gz"
+    # output_dir = r"D:\dataset\TEECT_data\registration_results\2d_3d"
+
     registrator.load_images(ct_path, ultrasound_path, ct_mask_path, us_mask_path)
     
     # 初始参数
@@ -2814,17 +2640,17 @@ def register_icp_multi_label():
     ])
     
     # ===== 方法1: 使用默认权重（所有标签等权） =====
-    print("\n" + "="*80)
-    print("方法1: 默认权重（所有标签等权）")
-    print("="*80)
+    # print("\n" + "="*80)
+    # print("方法1: 默认权重（所有标签等权）")
+    # print("="*80)
     
-    best_params_1, result_dict_1 = registrator.register_icp_multi_label(
+    best_params_1, result_dict_1 = registrator.register_multi_label(
         initial_params=initial_params,
         max_iterations=10,  # ICP外层迭代
         tolerance=0.1,  # 收敛阈值：平均距离变化<0.1mm
         max_correspondence_dist=30.0,  # 最大对应距离30mm
-        inner_opt_iterations=30,  # 每次ICP迭代内部优化30次
-        min_iterations=2,  # 最小迭代次数（避免过早停止）
+        inner_opt_iterations=100,  # 每次ICP迭代内部优化30次
+        # min_iterations=2,  # 最小迭代次数（避免过早停止）
         inner_optimizer='coordinate',  # 使用坐标轮换搜索而非GPS（更稳定）
         labels=[1, 2, 3, 4],  # 使用所有四腔标签
         label_weights=None  # 默认权重
@@ -2840,4 +2666,4 @@ def register_icp_multi_label():
 
 if __name__ == "__main__":
     # main()
-    register_icp_multi_label()
+    register_multi_label()
