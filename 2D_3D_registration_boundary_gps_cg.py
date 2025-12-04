@@ -205,13 +205,14 @@ class TwoD_ThreeD_Registration:
             if n_iter % 10 == 0:
                 print(f"{'='*60}")
                 print(f"  评估当前轮次{n_iter + 1}次...当前轮次代价: {f_current:.3f}mm")
-                mean_dist, label_mean_dists = self.evaluate_metric(x, self.labels, self.us_label_points)
+                mean_dist, label_mean_dists, mean_dice = self.evaluate_metric(x, self.labels, self.us_label_points)
                 # 记录历史
                 self.optimization_history.append({
                     'icp_iteration': n_iter + 1,
                     'params': x.copy(),
                     'mean_distance': mean_dist,
                     'label_distances': label_mean_dists.copy(),
+                    'mean_dice': mean_dice,
                     'optimized_cost': f_current
                 })
             
@@ -318,13 +319,14 @@ class TwoD_ThreeD_Registration:
             if iteration % 10 == 0:
                 print(f"{'='*60}")
                 print(f"  评估当前轮次{iteration + 1}次...当前轮次代价: {f_value:.3f}mm")
-                mean_dist, label_mean_dists = self.evaluate_metric(x, self.labels, self.us_label_points)
+                mean_dist, label_mean_dists, mean_dice = self.evaluate_metric(x, self.labels, self.us_label_points)
                 # 记录历史
                 self.optimization_history.append({
                     'icp_iteration': iteration + 1,
                     'params': x.copy(),
                     'mean_distance': mean_dist,
                     'label_distances': label_mean_dists.copy(),
+                    'mean_dice': mean_dice,
                     'optimized_cost': f_value
                 })
 
@@ -446,13 +448,14 @@ class TwoD_ThreeD_Registration:
             if it % 10 == 0:
                 print(f"{'='*60}")
                 print(f"  评估当前轮次{it + 1}次...当前轮次代价: {f_current:.3f}mm")
-                mean_dist, label_mean_dists = self.evaluate_metric(x, self.labels, self.us_label_points)
+                mean_dist, label_mean_dists, mean_dice = self.evaluate_metric(x, self.labels, self.us_label_points)
                 # 记录历史
                 self.optimization_history.append({
                     'icp_iteration': it + 1,
                     'params': x.copy(),
                     'mean_distance': mean_dist,
                     'label_distances': label_mean_dists.copy(),
+                    'mean_dice': mean_dice,
                     'optimized_cost': f_current
                 })
 
@@ -520,6 +523,50 @@ class TwoD_ThreeD_Registration:
         print(f"  CT spacing: {self.ct_volume.GetSpacing()}")
         print(f"  超声尺寸: {self.ultrasound_2d.GetSize()}")
         print(f"  超声spacing: {self.ultrasound_2d.GetSpacing()}")
+        
+    def compute_dice_coefficient(self, fixed_img: sitk.Image, moving_img: sitk.Image, label_ids: list = None) -> dict:
+        # 转换为numpy数组
+        fixed_array = sitk.GetArrayFromImage(fixed_img).squeeze()
+        resampled_array = sitk.GetArrayFromImage(moving_img).squeeze()
+        
+        # 获取所有标签（排除背景0）
+        fixed_labels = np.unique(fixed_array)
+        fixed_labels = fixed_labels[fixed_labels > 0]
+        
+        resampled_labels = np.unique(resampled_array)
+        resampled_labels = resampled_labels[resampled_labels > 0]
+        
+        # 计算每个标签的Dice系数
+        dice_scores = {}
+        all_dice_values = []
+        
+        for label_id in label_ids:
+            # 创建二值mask
+            fixed_mask = (fixed_array == label_id)
+            resampled_mask = (resampled_array == label_id)
+            
+            # 计算Dice系数
+            intersection = np.sum(fixed_mask & resampled_mask)
+            union = np.sum(fixed_mask) + np.sum(resampled_mask)
+            
+            if union > 0:
+                dice = 2.0 * intersection / union
+            else:
+                dice = 0.0
+            
+            dice_scores[label_id] = dice
+            all_dice_values.append(dice)
+            
+            print(f"  Label {label_id}: Dice = {dice:.4f}")
+        
+        # 计算平均Dice
+        if len(all_dice_values) > 0:
+            mean_dice = np.mean(all_dice_values)
+            print(f"  平均Dice: {mean_dice:.4f}")
+        else:
+            mean_dice = 0.0
+            print(f"  ⚠️ 警告：没有找到有效的标签")
+        return dice_scores, mean_dice
 
     def orthogonalize_direction_2d(self, direction):
         """
@@ -1156,15 +1203,14 @@ class TwoD_ThreeD_Registration:
         total_weight = 0.0
 
         for label_id, ct_pts in ct_label_points.items():
-            # 只有同时在CT和US中都存在的标签才参与
-            if label_id not in us_label_points:
-                continue
             us_pts = us_label_points[label_id]
-
-            if ct_pts is None or us_pts is None:
-                continue
-            if len(ct_pts) < 5 or len(us_pts) < 5:
-                continue
+            # 只有同时在CT和US中都存在的标签才参与
+            if label_id not in us_label_points or (ct_pts is None or us_pts is None) or (len(ct_pts) < 5 or len(us_pts) < 5):
+                return 1e6
+            # if ct_pts is None or us_pts is None:
+            #     continue
+            # if len(ct_pts) < 5 or len(us_pts) < 5:
+            #     continue
 
             # 单个标签的距离图loss
             label_cost = self.compute_edge_distance_map_loss(
@@ -1226,13 +1272,13 @@ class TwoD_ThreeD_Registration:
         us_norm = normalize(us_array)
         slice_norm = normalize(slice_array)
         
-        # fig = plt.figure(figsize=(18, 6))
+        fig = plt.figure(figsize=(18, 12))
         
  
-        fig = plt.figure(figsize=(20, 6))
+        # fig = plt.figure(figsize=(20, 6))
         
         # 1. Ultrasound image (with physical coordinates)
-        ax1 = plt.subplot(1, 4, 1)
+        ax1 = plt.subplot(2, 3, 1)
         ax1.imshow(us_norm, cmap='gray', extent=us_extent, aspect='auto')
         ax1.set_xlabel('X (mm)', fontsize=12)
         ax1.set_ylabel('Y (mm)', fontsize=12)
@@ -1240,7 +1286,7 @@ class TwoD_ThreeD_Registration:
         ax1.grid(True, alpha=0.3)
         
         # 2. Extracted CT slice (with physical coordinates)
-        ax2 = plt.subplot(1, 4, 2)
+        ax2 = plt.subplot(2, 3, 2)
         ax2.imshow(slice_norm, cmap='gray', extent=slice_extent, aspect='auto')
         ax2.set_xlabel('X (mm)', fontsize=12)
         ax2.set_ylabel('Y (mm)', fontsize=12)
@@ -1248,7 +1294,7 @@ class TwoD_ThreeD_Registration:
         ax2.grid(True, alpha=0.3)
         
         # 3. Overlay (需要重采样到相同的物理空间)
-        ax3 = plt.subplot(1, 4, 3)
+        ax3 = plt.subplot(2, 3, 3)
         
         # 方法1：如果尺寸相同，直接叠加
         # if us_array.shape == slice_array.shape:
@@ -1264,7 +1310,7 @@ class TwoD_ThreeD_Registration:
         ax3.grid(True, alpha=0.3)
         
         # 4. Optimization curve
-        ax4 = plt.subplot(1, 4, 4)
+        ax4 = plt.subplot(2, 3, 4)
         if len(self.optimization_history) > 0:
             if 'chamfer_dist' in self.optimization_history[0]:
                 cost_values = [h['chamfer_dist'] for h in self.optimization_history]
@@ -1275,9 +1321,28 @@ class TwoD_ThreeD_Registration:
                 ax4.plot(cost_values, 'b-', linewidth=2, marker='o', markersize=6)
                 ax4.set_ylabel('Mean Distance (mm)', fontsize=12)
             ax4.set_xlabel('Iteration', fontsize=12)
-            ax4.set_title('Optimization Curve', fontsize=14, fontweight='bold')
+            ax4.set_title('Distance Curve', fontsize=14, fontweight='bold')
             ax4.grid(True, alpha=0.3)
-        
+
+        ax5 = plt.subplot(2, 3, 5)
+        if len(self.optimization_history) > 0:
+            if 'mean_dice' in self.optimization_history[0]:
+                cost_values = [h['mean_dice'] for h in self.optimization_history]
+                ax5.plot(cost_values, 'r-', linewidth=2, marker='o', markersize=6)
+                ax5.set_ylabel('Mean Dice', fontsize=12)
+            ax5.set_xlabel('Iteration', fontsize=12)
+            ax5.set_title('Dice Curve', fontsize=14, fontweight='bold')
+            ax5.grid(True, alpha=0.3)
+            
+        ax6 = plt.subplot(2, 3, 6)
+        if len(self.optimization_history) > 0:
+            if 'optimized_cost' in self.optimization_history[0]:
+                cost_values = [h['optimized_cost'] for h in self.optimization_history]
+                ax6.plot(cost_values, 'g-', linewidth=2, marker='o', markersize=6)
+                ax6.set_ylabel('Optimized Cost', fontsize=12)
+            ax6.set_xlabel('Iteration', fontsize=12)
+            ax6.set_title('Optimization Curve', fontsize=14, fontweight='bold')
+            ax6.grid(True, alpha=0.3)
         plt.tight_layout()
         
         # Save figure
@@ -1537,6 +1602,7 @@ class TwoD_ThreeD_Registration:
         
         # 步骤2: 计算各标签的平均距离（用于收敛判断）
         label_mean_dists = {}
+        dice_scores = {}
         total_valid_points = 0
         
         for label_id in ct_label_points.keys():
@@ -1550,6 +1616,23 @@ class TwoD_ThreeD_Registration:
             tree = cKDTree(us_pts)
             distances, _ = tree.query(ct_pts)
             
+            fixed_arr = sitk.GetArrayFromImage(mask_slice)
+            moving_arr = sitk.GetArrayFromImage(self.us_mask)
+            # 计算Dice系数
+            fixed_mask = (fixed_arr == label_id)
+            moving_mask = (moving_arr == label_id)
+            
+            # 计算Dice系数
+            intersection = np.sum(fixed_mask & moving_mask)
+            union = np.sum(fixed_mask) + np.sum(moving_mask)
+            
+            if union > 0:
+                dice = 2.0 * intersection / union
+            else:
+                dice = 0.0
+            
+            dice_scores[label_id] = dice
+            
             if len(distances) > 0:
                 label_mean_dists[label_id] = np.mean(distances)
                 total_valid_points += len(distances)
@@ -1559,13 +1642,15 @@ class TwoD_ThreeD_Registration:
         
         # 全局平均距离（用于收敛判断）
         mean_dist = np.mean(list(label_mean_dists.values()))
+        mean_dice = np.mean(list(dice_scores.values()))
         
-        print(f"\n  [各标签对应距离]")
+        print(f"\n  [评估指标：]")
         for label_id, dist in label_mean_dists.items():
-            print(f"    标签 {label_id} ({CHAMBER_LABELS.get(label_id, 'Unknown')}): {dist:.3f}mm")
+            print(f"    标签 {label_id} ({CHAMBER_LABELS.get(label_id, 'Unknown')}): dist: {dist:.3f}mm, Dice: {dice_scores[label_id]:.4f}")
         print(f"  全局平均距离: {mean_dist:.3f}mm")
         print(f"  有效对应点总数: {total_valid_points}")
-        return mean_dist, label_mean_dists
+        print(f"  平均Dice: {mean_dice:.4f}")
+        return mean_dist, label_mean_dists, mean_dice
 
     def correspondence_cost(self, p):
         """多标签对应代价函数"""
@@ -1625,7 +1710,7 @@ class TwoD_ThreeD_Registration:
             max_correspondence_dist: 最大对应点距离阈值（mm）
             inner_opt_iterations: 每次ICP迭代内部的优化迭代次数
             min_iterations: 最小迭代次数，避免过早停止
-            inner_optimizer: 内层优化器类型（'gps'、'coordinate'、'conjugate_gradient'）
+            inner_optimizer: 内层优化器类型（'gps'、'coordinate'、'conjugate_gradient'，'powell'）
             inner_optimizer_params: 内层优化器参数（可选）
             labels: 要使用的标签列表
             label_weights: 各标签的权重（可选）
@@ -1659,6 +1744,7 @@ class TwoD_ThreeD_Registration:
             1.0, 1.0, 1.0,      # 角度
             1.0, 1.0, 1.0,   # 平移
             1.0, 1.0            # 缩放
+            # 0.5, 0.5            # 缩放
         ])
         initial_params_norm = initial_params / self.param_scales
         params = initial_params_norm.copy()
@@ -1670,8 +1756,10 @@ class TwoD_ThreeD_Registration:
                     (params[3]-50 / self.param_scales[3], params[3]+50 / self.param_scales[3]),
                     (params[4]-50 / self.param_scales[4], params[4]+50 / self.param_scales[4]),
                     (params[5]-50 / self.param_scales[5], params[5]+50 / self.param_scales[5]),
-                    (0.8, 1.2),
-                    (0.8, 1.2)
+                    (0.8 / self.param_scales[6], 1.2 / self.param_scales[6]),
+                    (0.8 / self.param_scales[7], 1.2 / self.param_scales[7])
+                    # (0.5, 1.5),
+                    # (0.5, 1.5)
                 ]
         # === 提取超声各标签的边缘点（固定，只提取一次）===
         print("  提取超声各标签边缘点...")
@@ -1742,7 +1830,8 @@ class TwoD_ThreeD_Registration:
         elif optimizer_mode in {'coordinate', 'cyclic'}:
             print(f"    使用坐标轮换搜索...")
             coord_steps = np.array(
-                inner_optimizer_params.get('per_dim_initial_step', [0.05, 0.05, 0.05, 1, 1, 1, 0.02, 0.02]),
+                inner_optimizer_params.get('per_dim_initial_step', [0.05, 0.05, 0.05, 1, 1, 1, 0.02, 0.02]), # 适合四腔
+                # inner_optimizer_params.get('per_dim_initial_step', [0.05, 0.05, 0.05, 1, 1, 1, 0.1, 0.1]), # 适合二腔
                 dtype=float
             )
             result = self.coordinate_cyclic_search(
@@ -1772,6 +1861,59 @@ class TwoD_ThreeD_Registration:
             )
             print(f"    CG评估次数: {result['nfev']}")
             print(f"    CG状态: {result['status']}")
+        elif optimizer_mode in {'powell'}:
+            print(f"    使用Powell优化...")
+            # Powell方法不支持bounds，需要手动投影到边界
+            def project_to_bounds(x):
+                x_proj = x.copy()
+                for i, (lb, ub) in enumerate(bounds_norm):
+                    x_proj[i] = np.clip(x_proj[i], lb, ub)
+                return x_proj
+            
+            # 包装目标函数，自动投影到边界
+            def bounded_objective(x):
+                x_bounded = project_to_bounds(x)
+                return self.correspondence_cost(x_bounded)
+            
+            # 使用scipy的Powell方法
+            scipy_result = minimize(
+                bounded_objective,
+                x0=params,
+                method='powell',
+                options={
+                    'maxiter': inner_opt_iterations,
+                    'xtol': inner_optimizer_params.get('tol', 1e-4),
+                    'ftol': inner_optimizer_params.get('ftol', 1e-4),
+                    'disp': False
+                }
+            )
+            
+            # 转换为统一的结果格式
+            best_params_final = project_to_bounds(scipy_result.x)
+            best_cost_final = scipy_result.fun
+            
+            # 记录历史（Powell不提供中间历史，只记录最终结果）
+            history = [{
+                'x': best_params_final.copy(),
+                'f': best_cost_final,
+                'n_func_evals': scipy_result.nfev
+            }]
+            
+            result = {
+                'x': best_params_final,
+                'fun': best_cost_final,
+                'nit': scipy_result.nit,
+                'nfev': scipy_result.nfev,
+                'success': scipy_result.success,
+                'message': scipy_result.message,
+                'history': history,
+                'best_cost': best_cost_final,
+                'best_params': best_params_final.copy()
+            }
+            
+            print(f"    Powell评估次数: {result['nfev']}")
+            print(f"    Powell迭代次数: {result['nit']}")
+            print(f"    Powell状态: {'成功' if result['success'] else '未收敛'}")
         else:
             raise ValueError(f"未知内层优化器: {inner_optimizer}")
         
@@ -2065,7 +2207,8 @@ class TwoD_ThreeD_Registration:
             if optimizer_mode == 'gps':
                 print(f"    使用GPS优化...")
                 gps_step_scales = np.array(
-                    inner_optimizer_params.get('step_scales', [2.0, 2.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0]),
+                    # inner_optimizer_params.get('step_scales', [2.0, 2.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0]),
+                    inner_optimizer_params.get('step_scales', [0.05, 0.05, 0.05, 1, 1, 1, 0.02, 0.02]),
                     dtype=float
                 )
                 gps_contraction = np.array(
@@ -2126,6 +2269,59 @@ class TwoD_ThreeD_Registration:
                 )
                 print(f"    CG评估次数: {result['nfev']}")
                 print(f"    CG状态: {result['status']}")
+            elif optimizer_mode in {'powell'}:
+                print(f"    使用Powell优化...")
+                # Powell方法不支持bounds，需要手动投影到边界
+                def project_to_bounds(x):
+                    x_proj = x.copy()
+                    for i, (lb, ub) in enumerate(bounds_norm):
+                        x_proj[i] = np.clip(x_proj[i], lb, ub)
+                    return x_proj
+                
+                # 包装目标函数，自动投影到边界
+                def bounded_objective(x):
+                    x_bounded = project_to_bounds(x)
+                    return self.correspondence_cost(x_bounded)
+                
+                # 使用scipy的Powell方法
+                scipy_result = minimize(
+                    bounded_objective,
+                    x0=params,
+                    method='powell',
+                    options={
+                        'maxiter': inner_opt_iterations,
+                        'xtol': inner_optimizer_params.get('tol', 1e-4),
+                        'ftol': inner_optimizer_params.get('ftol', 1e-4),
+                        'disp': False
+                    }
+                )
+                
+                # 转换为统一的结果格式
+                best_params_final = project_to_bounds(scipy_result.x)
+                best_cost_final = scipy_result.fun
+                
+                # 记录历史（Powell不提供中间历史，只记录最终结果）
+                history = [{
+                    'x': best_params_final.copy(),
+                    'f': best_cost_final,
+                    'n_func_evals': scipy_result.nfev
+                }]
+                
+                result = {
+                    'x': best_params_final,
+                    'fun': best_cost_final,
+                    'nit': scipy_result.nit,
+                    'nfev': scipy_result.nfev,
+                    'success': scipy_result.success,
+                    'message': scipy_result.message,
+                    'history': history,
+                    'best_cost': best_cost_final,
+                    'best_params': best_params_final.copy()
+                }
+                
+                print(f"    Powell评估次数: {result['nfev']}")
+                print(f"    Powell迭代次数: {result['nit']}")
+                print(f"    Powell状态: {'成功' if result['success'] else '未收敛'}")
             else:
                 raise ValueError(f"未知内层优化器: {inner_optimizer}")
             
@@ -2204,7 +2400,7 @@ class TwoD_ThreeD_Registration:
             'num_iterations': len(self.optimization_history),
             'elapsed_time': elapsed_time,
             'best_slice': best_slice,
-            'us_label_points': us_label_points,
+            'us_label_points': self.us_label_points,
             'initial_ct_label_points': initial_ct_label_points,
             'final_ct_label_points': final_ct_label_points,
             'labels': labels
@@ -2608,17 +2804,19 @@ def register_multi_label():
     registrator = TwoD_ThreeD_Registration()
    
     # # 加载数据（包括mask）
-    # ct_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\CT_resampled_nii\Patient_0000.nii.gz"
-    # ultrasound_path = r"D:\dataset\TEECT_data\tee_paired\Patient_0000\slice_117_t5.0_rx25_ry0_initial_transform.nii.gz"
-    # ct_mask_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\Segmentation\Patient_0000\Patient_0000_label.nii.gz"  # CT心脏mask路径
-    # us_mask_path = r"D:\dataset\TEECT_data\tee_paired\Patient_0000\slice_117_t5.0_rx25_ry0_initial_transform_1.nii.gz"
-    # output_dir = r"D:\dataset\TEECT_data\registration_results_paired\2d_3d_multi_label\Patient_0000"
+    ct_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\CT_resampled_nii\Patient_0000.nii.gz"
+    ultrasound_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\Multi-view_preprocess_images\Patient_0000\A4C_initial_transform.nii.gz"
+    # ultrasound_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\Multi-view_preprocess_images\Patient_0000\A2C_initial_transform.nii.gz"
+    ct_mask_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\Segmentation\Patient_0000\Patient_0000_label.nii.gz"  # CT心脏mask路径
+    us_mask_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\Multi-view_preprocess_images\Patient_0000\A4C_seg_initial_transform.nii.gz"
+    # us_mask_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\Multi-view_preprocess_images\Patient_0000\A2C_seg_initial_transform.nii.gz"
+    output_dir = r"D:\dataset\TEECT_data\registration_results_paired\2d_3d_multi_label\Patient_0000_A4C"
     
-    ct_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\CT_resampled_nii\Patient_0036.nii.gz"
-    ultrasound_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\Multi-view_preprocess_images\Patient_0036\A4C1_initial_transform.nii.gz"
-    ct_mask_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\Segmentation\Patient_0036\Patient_0036_label.nii.gz"  # CT心脏mask路径
-    us_mask_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\Multi-view_preprocess_images\Patient_0036\A4C_seg1_initial_transform.nii.gz"
-    output_dir = r"D:\dataset\TEECT_data\registration_results_paired\2d_3d_multi_label\Patient_0036"
+    # ct_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\CT_resampled_nii\Patient_0036.nii.gz"
+    # ultrasound_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\Multi-view_preprocess_images\Patient_0036\A4C1_initial_transform.nii.gz"
+    # ct_mask_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\Segmentation\Patient_0036\Patient_0036_label.nii.gz"  # CT心脏mask路径
+    # us_mask_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\Multi-view_preprocess_images\Patient_0036\A4C_seg1_initial_transform.nii.gz"
+    # output_dir = r"D:\dataset\TEECT_data\registration_results_paired\2d_3d_multi_label\Patient_0036"
 
     # ct_path = r"D:\dataset\CT\MM-WHS2017\ct_train\ct_train_1004_image.nii"
     # ultrasound_path = r"D:\dataset\TEECT_data\tee\patient-1-4\slice_060_image_initial_transform.nii.gz"
@@ -2630,12 +2828,13 @@ def register_multi_label():
     
     # 初始参数
     initial_params = np.array([
-        np.radians(50),   # alpha: 50°
+        np.radians(25),   # alpha: 50°
         np.radians(0),  # beta: -25°
         np.radians(0),    # gamma: 0°
         # 5.77, -163.36, 5.0,   # translation: (x, y, z) mm
-        # 3.0, 17.0, 6.0, 
-        3.0, 5.0, 0.5,
+        3.0, 17.0, 6.0,  #Patient_0000 A4C
+        # 3.0, 17.0, -4.0,  #Patient_0000 A2C
+        # 3.0, 5.0, 0.5, #Patient_0036 A4C
         1.0, 1.0         # scaling: (sx, sy)
     ])
     
@@ -2651,7 +2850,7 @@ def register_multi_label():
         max_correspondence_dist=30.0,  # 最大对应距离30mm
         inner_opt_iterations=100,  # 每次ICP迭代内部优化30次
         # min_iterations=2,  # 最小迭代次数（避免过早停止）
-        inner_optimizer='coordinate',  # 使用坐标轮换搜索而非GPS（更稳定）
+        inner_optimizer='coordinate',  # coordinate/gps/powell
         labels=[1, 2, 3, 4],  # 使用所有四腔标签
         label_weights=None  # 默认权重
     )

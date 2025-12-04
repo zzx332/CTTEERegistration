@@ -986,13 +986,12 @@ class EdgeBasedICPRegistration:
         fixed_landmarks = []
 
         for label_id in label_ids:
-            moving_landmarks.append(moving_centroids[label_id])
-            fixed_landmarks.append(fixed_centroids[label_id])
-            # if label_id in moving_centroids and label_id in fixed_centroids:
-            #     moving_landmarks.append(moving_centroids[label_id])
-            #     fixed_landmarks.append(fixed_centroids[label_id])
-            # else:
-            #     print(f"⚠️ 警告：Label {label_id} 在某个图像中缺失，跳过")
+            # moving_landmarks.append(moving_centroids[label_id])
+            # fixed_landmarks.append(fixed_centroids[label_id])
+            if label_id in moving_centroids:
+                moving_landmarks.append(moving_centroids[label_id])
+            if label_id in fixed_centroids:
+                fixed_landmarks.append(fixed_centroids[label_id])
 
         moving_landmarks = np.array(moving_landmarks)
         fixed_landmarks = np.array(fixed_landmarks)
@@ -1020,6 +1019,8 @@ class EdgeBasedICPRegistration:
         
         for moving_path in moving_files:
             try:
+                if moving_path.name not in ["slice_117_t5.0_rx25_ry0.nii.gz"]:
+                    continue
                 moving_landmarks, fixed_landmarks = self.compute_landmarks(fixed_edge_path, moving_path)
                 if len(moving_landmarks) != len(fixed_landmarks):
                     print(moving_path.name, "moving_landmarks和fixed_landmarks点对数量不一致")
@@ -1197,10 +1198,10 @@ def batch_registration_example():
     
     icp_reg = EdgeBasedICPRegistration()
     
-    moving_label_dir = r"D:\dataset\TEECT_data\ct_paired\Patient_0036_label"
+    moving_label_dir = r"D:\dataset\TEECT_data\ct_paired\Patient_0000_label"
     # fixed_label_path = r"D:\dataset\TEECT_data\tee_paired\Patient_0036\A4C_seg.nii.gz"
-    fixed_label_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\Multi-view_preprocess_images\Patient_0036\A4C_seg1.nii.gz"
-    output_dir = r"D:\dataset\TEECT_data\registration_results_paired\icp_chamber_pt_batch"
+    fixed_label_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\Multi-view_preprocess_images\Patient_0000\A4C_seg.nii.gz"
+    output_dir = r"D:\dataset\TEECT_data\registration_results_paired\icp_chamber_pt_batch\Patient_0000_A4C"
 
     
     icp_reg.batch_register(
