@@ -12,6 +12,7 @@ from typing import Tuple, Optional, Callable, List, Dict
 from scipy.spatial import cKDTree
 import time
 import os
+import pandas as pd
 
 os.environ['ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS'] = '1'  # 可选
 sitk.ProcessObject_SetGlobalWarningDisplay(False)  
@@ -36,6 +37,12 @@ class TwoD_ThreeD_Registration:
         self.ct_mask = None  # 新增：CT心脏mask
         self.best_params = None
         self.optimization_history = []
+        # 多尺度距离图当前尺度（mm），默认细尺度
+        self.grid_spacing = 1.0
+        # 多标签/US边缘缓存
+        self.labels = None
+        self.label_weights = None
+        self.us_label_points = None
     
     def generalized_pattern_search(
         self,
@@ -205,7 +212,7 @@ class TwoD_ThreeD_Registration:
             if n_iter % 10 == 0:
                 print(f"{'='*60}")
                 print(f"  评估当前轮次{n_iter + 1}次...当前轮次代价: {f_current:.3f}mm")
-                mean_dist, label_mean_dists, mean_dice = self.evaluate_metric(x, self.labels, self.us_label_points)
+                mean_dist, label_mean_dists, mean_dice, _, _, _ = self.evaluate_metric(x, self.labels, self.us_label_points)
                 # 记录历史
                 self.optimization_history.append({
                     'icp_iteration': n_iter + 1,
@@ -319,7 +326,7 @@ class TwoD_ThreeD_Registration:
             if iteration % 10 == 0:
                 print(f"{'='*60}")
                 print(f"  评估当前轮次{iteration + 1}次...当前轮次代价: {f_value:.3f}mm")
-                mean_dist, label_mean_dists, mean_dice = self.evaluate_metric(x, self.labels, self.us_label_points)
+                mean_dist, label_mean_dists, mean_dice, _, _, _ = self.evaluate_metric(x, self.labels, self.us_label_points)
                 # 记录历史
                 self.optimization_history.append({
                     'icp_iteration': iteration + 1,
@@ -412,6 +419,8 @@ class TwoD_ThreeD_Registration:
             return projected
         
         f_current = objective_func(x)
+        # print(f"  评估初始参数结果...")
+        # _, _, _ = self.evaluate_metric(x, self.labels, self.us_label_points)
         n_func_evals = 1
         history = []
         best_cost = float('inf')
@@ -448,7 +457,7 @@ class TwoD_ThreeD_Registration:
             if it % 10 == 0:
                 print(f"{'='*60}")
                 print(f"  评估当前轮次{it + 1}次...当前轮次代价: {f_current:.3f}mm")
-                mean_dist, label_mean_dists, mean_dice = self.evaluate_metric(x, self.labels, self.us_label_points)
+                mean_dist, label_mean_dists, mean_dice, _, _, _ = self.evaluate_metric(x, self.labels, self.us_label_points)
                 # 记录历史
                 self.optimization_history.append({
                     'icp_iteration': it + 1,
@@ -481,7 +490,7 @@ class TwoD_ThreeD_Registration:
         }
         return result
         
-    def load_images(self, ct_path: str, ultrasound_path: str, ct_mask_path: Optional[str] = None, us_mask_path: Optional[str] = None):
+    def load_images(self, ct_path: str, ultrasound_path: str, ct_mask_path: Optional[str] = None, us_mask_path: Optional[str] = None, best_slice_path: str = None):
         """
         加载3D CT和2D超声图像
         
@@ -493,7 +502,6 @@ class TwoD_ThreeD_Registration:
         print("加载图像...")
         self.ct_volume = sitk.ReadImage(ct_path)
         self.ultrasound_2d = sitk.ReadImage(ultrasound_path)
-        
         # 加载mask（如果提供）
         if ct_mask_path is not None:
             print(f"加载CT mask: {ct_mask_path}")
@@ -523,7 +531,16 @@ class TwoD_ThreeD_Registration:
         print(f"  CT spacing: {self.ct_volume.GetSpacing()}")
         print(f"  超声尺寸: {self.ultrasound_2d.GetSize()}")
         print(f"  超声spacing: {self.ultrasound_2d.GetSpacing()}")
-        
+
+    def transform_us(self, patient_id: str, coarse_regis_result_path: str, best_slice_path: str):
+        best_slice_name = os.path.basename(best_slice_path).split(".gz")[0]
+        fixed_img = sitk.ReadImage(best_slice_path)
+        transform = sitk.ReadTransform(os.path.join(coarse_regis_result_path, f"{patient_id}_A4C", f"{best_slice_name}_transform.tfm"))
+        inverse_transform = transform.GetInverse()
+        self.ultrasound_2d = sitk.Resample(self.ultrasound_2d, fixed_img, inverse_transform, sitk.sitkLinear, 0.0)
+        self.us_mask = sitk.Resample(self.us_mask, fixed_img, inverse_transform, sitk.sitkNearestNeighbor, 0.0)
+        print(f"  超声图像已变换到CT空间")
+
     def compute_dice_coefficient(self, fixed_img: sitk.Image, moving_img: sitk.Image, label_ids: list = None) -> dict:
         # 转换为numpy数组
         fixed_array = sitk.GetArrayFromImage(fixed_img).squeeze()
@@ -1644,13 +1661,17 @@ class TwoD_ThreeD_Registration:
         mean_dist = np.mean(list(label_mean_dists.values()))
         mean_dice = np.mean(list(dice_scores.values()))
         
+        # landmark distance evaluation
+        from evaluation_landmark_distance import cal_apex_distance
+        apex_distance, mitral_distance, tricuspid_annulus_distance = cal_apex_distance(self.ct_mask, alpha, beta, gamma, tx, ty, tz, sx, sy)
         print(f"\n  [评估指标：]")
         for label_id, dist in label_mean_dists.items():
             print(f"    标签 {label_id} ({CHAMBER_LABELS.get(label_id, 'Unknown')}): dist: {dist:.3f}mm, Dice: {dice_scores[label_id]:.4f}")
         print(f"  全局平均距离: {mean_dist:.3f}mm")
         print(f"  有效对应点总数: {total_valid_points}")
         print(f"  平均Dice: {mean_dice:.4f}")
-        return mean_dist, label_mean_dists, mean_dice
+        print(f"  心尖距离: {apex_distance:.2f}mm, 二尖瓣环距离: {mitral_distance:.2f}mm, 三尖瓣环距离: {tricuspid_annulus_distance:.2f}mm")
+        return mean_dist, label_mean_dists, mean_dice, apex_distance, mitral_distance, tricuspid_annulus_distance
 
     def correspondence_cost(self, p):
         """多标签对应代价函数"""
@@ -1679,7 +1700,7 @@ class TwoD_ThreeD_Registration:
                 ct_pts_dict,
                 self.us_label_points,
                 label_weights=self.label_weights,
-                grid_spacing=1.0
+                grid_spacing=self.grid_spacing  # ★ 使用当前尺度
             )
             
             return cost
@@ -1693,34 +1714,27 @@ class TwoD_ThreeD_Registration:
         max_iterations: int = 50,
         tolerance: float = 1e-4,
         max_correspondence_dist: float = 50.0,
-        inner_opt_iterations: int = 50,
-        # min_iterations: int = 10,
+        inner_opt_iterations: int = 50,    # 单次优化器迭代上限
         inner_optimizer: str = 'gps',
-        inner_optimizer_params: Optional[Dict[str, float]] = {},
+        inner_optimizer_params: Optional[Dict[str, float]] = None,
         labels: List[int] = [1, 2, 3, 4],
-        label_weights: Optional[Dict[int, float]] = None
+        label_weights: Optional[Dict[int, float]] = None,
+        scales: Optional[List[float]] = None,
+        n_starts: int = 3,
+        patient_id: Optional[str] = None,  # 新增：患者ID
+        output_dir: Optional[str] = None  # 新增：输出目录，用于保存CSV
     ) -> Tuple[np.ndarray, dict]:
         """
-        使用多标签距离图进行2D-3D配准
-        
-        Args:
-            initial_params: 初始参数 [alpha, beta, gamma, tx, ty, tz, sx, sy]
-            max_iterations: 最大ICP外层迭代次数
-            tolerance: 收敛阈值（平均距离变化）
-            max_correspondence_dist: 最大对应点距离阈值（mm）
-            inner_opt_iterations: 每次ICP迭代内部的优化迭代次数
-            min_iterations: 最小迭代次数，避免过早停止
-            inner_optimizer: 内层优化器类型（'gps'、'coordinate'、'conjugate_gradient'，'powell'）
-            inner_optimizer_params: 内层优化器参数（可选）
-            labels: 要使用的标签列表
-            label_weights: 各标签的权重（可选）
-        
-        Returns:
-            best_params: 最优参数
-            result_dict: 结果字典
+        使用多标签距离图进行2D-3D配准（粗到细，多尺度 + 多初值）
+
+        Args 里新增：
+            scales: 距离图的物理间距列表（粗→细），例如 [4.0, 2.0, 1.0]
+            n_starts: 每个尺度使用的初值个数（第一个为"主初值"，其余为扰动）
+            patient_id: 患者ID，用于CSV记录
+            output_dir: 输出目录，用于保存CSV文件
         """
         print(f"\n{'='*80}")
-        print(f"\n开始2D-3D 多标签ICP配准...")
+        print(f"\n开始2D-3D 多标签多尺度配准...")
         print(f"\n{'='*80}")
         self.labels = labels
         self.label_weights = label_weights
@@ -1728,7 +1742,14 @@ class TwoD_ThreeD_Registration:
         if self.label_weights:
             print(f"  标签权重: {self.label_weights}")
         
-       
+        if inner_optimizer_params is None:
+            inner_optimizer_params = {}
+        # 默认尺度：单尺度1.0mm
+        if scales is None or len(scales) == 0:
+            scales = [1.0]
+        # 从粗到细
+        scales = list(scales)
+
         start_time = time.time()
         
         # 默认初始参数
@@ -1742,25 +1763,12 @@ class TwoD_ThreeD_Registration:
         # 参数归一化
         self.param_scales = np.array([
             1.0, 1.0, 1.0,      # 角度
-            1.0, 1.0, 1.0,   # 平移
+            1.0, 1.0, 1.0,      # 平移
             1.0, 1.0            # 缩放
-            # 0.5, 0.5            # 缩放
         ])
-        initial_params_norm = initial_params / self.param_scales
-        params = initial_params_norm.copy()
+        params_norm_base = initial_params / self.param_scales
         self.optimization_history = []
-        bounds_norm = [
-                    (params[0]-np.pi * 50/180 / self.param_scales[0], params[0]+np.pi * 50/180 / self.param_scales[0]),
-                    (params[1]-np.pi * 50/180 / self.param_scales[1], params[1]+np.pi * 50/180 / self.param_scales[1]),
-                    (params[2]-np.pi / self.param_scales[2], params[2]+np.pi / self.param_scales[2]),
-                    (params[3]-50 / self.param_scales[3], params[3]+50 / self.param_scales[3]),
-                    (params[4]-50 / self.param_scales[4], params[4]+50 / self.param_scales[4]),
-                    (params[5]-50 / self.param_scales[5], params[5]+50 / self.param_scales[5]),
-                    (0.8 / self.param_scales[6], 1.2 / self.param_scales[6]),
-                    (0.8 / self.param_scales[7], 1.2 / self.param_scales[7])
-                    # (0.5, 1.5),
-                    # (0.5, 1.5)
-                ]
+
         # === 提取超声各标签的边缘点（固定，只提取一次）===
         print("  提取超声各标签边缘点...")
         self.us_label_points = self.extract_edge_points_by_label(
@@ -1773,186 +1781,257 @@ class TwoD_ThreeD_Registration:
         if len(self.us_label_points) == 0:
             raise ValueError("US中没有有效的标签边缘点！")
         
-        # 打印统计信息
         total_us_points = sum(len(pts) for pts in self.us_label_points.values())
         print(f"  US总边缘点数: {total_us_points}")
         
-        # prev_mean_dist = float('inf')
-        self.best_params = params.copy()
-        self.best_cost = float('inf')
-        
-        # 保存初始边缘点
-        initial_ct_label_points = None
-        initial_params_saved = initial_params.copy()
-        
-
+        # ===== 评估初始参数 =====
         print(f"\n{'='*60}")
-        print(f"优化参数")
+        print(f"评估初始参数...")
         print(f"{'='*60}")
-        self.evaluate_metric(params, self.labels, self.us_label_points)
-        
-        # 步骤3: 优化参数
-        # 使用优化器
-        print(f"\n  [参数优化]")
-        optimizer_mode = inner_optimizer.lower()
-        if optimizer_mode == 'gps':
-            print(f"    使用GPS优化...")
-            gps_step_scales = np.array(
-                inner_optimizer_params.get('step_scales', [2.0, 2.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0]),
-                dtype=float
-            )
-            gps_contraction = np.array(
-                inner_optimizer_params.get('per_dim_contraction', [0.9, 0.9, 0.9, 0.6, 0.6, 0.6, 0.75, 0.75]),
-                dtype=float
-            )
-            gps_expansion = np.array(
-                inner_optimizer_params.get('per_dim_expansion', [1.1, 1.1, 1.1, 1.3, 1.3, 1.3, 1.05, 1.05]),
-                dtype=float
-            )
+        initial_params_norm = params_norm_base.copy()
+        initial_mean_dist, initial_label_dists, initial_mean_dice, initial_apex_dist, initial_mitral_dist, initial_tricuspid_dist = self.evaluate_metric(
+            initial_params_norm, self.labels, self.us_label_points
+        )
 
-            result = self.generalized_pattern_search(
-                self.correspondence_cost,
-                x0=params,
-                bounds=bounds_norm,
-                max_iter=inner_opt_iterations,
-                tol=inner_optimizer_params.get('tol', 1e-6),
-                initial_step=inner_optimizer_params.get('initial_step', 0.1),
-                expansion_factor=inner_optimizer_params.get('expansion_factor', 2.0),
-                contraction_factor=inner_optimizer_params.get('contraction_factor', 0.5),
-                step_scales=gps_step_scales,
-                per_dim_contraction=gps_contraction,
-                per_dim_expansion=gps_expansion,
-                min_step=inner_optimizer_params.get('min_step', 1e-8)
-            )
-            
-            print(f"    GPS评估次数: {result['nfev']}")
-            print(f"    GPS最终步长: {result['final_step_size']:.2e}")
-        elif optimizer_mode in {'coordinate', 'cyclic'}:
-            print(f"    使用坐标轮换搜索...")
-            coord_steps = np.array(
-                inner_optimizer_params.get('per_dim_initial_step', [0.05, 0.05, 0.05, 1, 1, 1, 0.02, 0.02]), # 适合四腔
-                # inner_optimizer_params.get('per_dim_initial_step', [0.05, 0.05, 0.05, 1, 1, 1, 0.1, 0.1]), # 适合二腔
-                dtype=float
-            )
-            result = self.coordinate_cyclic_search(
-                self.correspondence_cost,
-                x0=params,
-                bounds=bounds_norm,
-                max_iter=inner_opt_iterations,
-                initial_step=inner_optimizer_params.get('initial_step', 0.2),
-                per_dim_initial_step=coord_steps,
-                step_decay=inner_optimizer_params.get('step_decay', 0.6),
-                min_step=inner_optimizer_params.get('min_step', 1e-4)
-            )
+        # 保存初始评估结果
+        initial_evaluation = {
+            'mean_distance': initial_mean_dist,
+            'mean_dice': initial_mean_dice,
+            'apex_distance': initial_apex_dist,
+            'mitral_distance': initial_mitral_dist,
+            'tricuspid_annulus_distance': initial_tricuspid_dist
+        }
 
-        elif optimizer_mode in {'cg', 'conjugate_gradient'}:
-            print(f"    使用共轭梯度优化...")
-            result = self.conjugate_gradient_optimize(
-                objective_func=self.correspondence_cost,
-                x0=params,
-                bounds=bounds_norm,
-                max_iter=inner_opt_iterations,
-                tol=inner_optimizer_params.get('tol', 1e-4),
-                grad_step=inner_optimizer_params.get('grad_step', 1e-3),
-                line_search_start=inner_optimizer_params.get('line_search_start', 1.0),
-                line_search_shrink=inner_optimizer_params.get('line_search_shrink', 0.5),
-                armijo_coeff=inner_optimizer_params.get('armijo_coeff', 1e-4),
-                beta_strategy=inner_optimizer_params.get('beta_strategy', 'pr')
-            )
-            print(f"    CG评估次数: {result['nfev']}")
-            print(f"    CG状态: {result['status']}")
-        elif optimizer_mode in {'powell'}:
-            print(f"    使用Powell优化...")
-            # Powell方法不支持bounds，需要手动投影到边界
-            def project_to_bounds(x):
-                x_proj = x.copy()
-                for i, (lb, ub) in enumerate(bounds_norm):
-                    x_proj[i] = np.clip(x_proj[i], lb, ub)
-                return x_proj
-            
-            # 包装目标函数，自动投影到边界
-            def bounded_objective(x):
-                x_bounded = project_to_bounds(x)
-                return self.correspondence_cost(x_bounded)
-            
-            # 使用scipy的Powell方法
-            scipy_result = minimize(
-                bounded_objective,
-                x0=params,
-                method='powell',
-                options={
-                    'maxiter': inner_opt_iterations,
-                    'xtol': inner_optimizer_params.get('tol', 1e-4),
-                    'ftol': inner_optimizer_params.get('ftol', 1e-4),
-                    'disp': False
-                }
-            )
-            
-            # 转换为统一的结果格式
-            best_params_final = project_to_bounds(scipy_result.x)
-            best_cost_final = scipy_result.fun
-            
-            # 记录历史（Powell不提供中间历史，只记录最终结果）
-            history = [{
-                'x': best_params_final.copy(),
-                'f': best_cost_final,
-                'n_func_evals': scipy_result.nfev
-            }]
-            
-            result = {
-                'x': best_params_final,
-                'fun': best_cost_final,
-                'nit': scipy_result.nit,
-                'nfev': scipy_result.nfev,
-                'success': scipy_result.success,
-                'message': scipy_result.message,
-                'history': history,
-                'best_cost': best_cost_final,
-                'best_params': best_params_final.copy()
-            }
-            
-            print(f"    Powell评估次数: {result['nfev']}")
-            print(f"    Powell迭代次数: {result['nit']}")
-            print(f"    Powell状态: {'成功' if result['success'] else '未收敛'}")
-        else:
-            raise ValueError(f"未知内层优化器: {inner_optimizer}")
-        
-        # 更新参数
-        # params = result['x'] if isinstance(result, dict) else result.x
-        # current_cost = result['fun'] if isinstance(result, dict) else result.fun
-        self.best_params = result['best_params'] if isinstance(result, dict) else result.best_params
-        self.best_cost = result['best_cost'] if isinstance(result, dict) else result.best_cost
-        
-        print(f"    优化后代价: {self.best_cost:.3f}mm")
-        
-        # 获取优化成功状态
-        if isinstance(result, dict):
-            opt_success = result.get('success', True)
-        else:
-            opt_success = result.success if hasattr(result, 'success') else True
-        print(f"    优化成功: {opt_success}")
-        
-        
-        # # 步骤4: 检查收敛
-        # dist_change = abs(prev_mean_dist - mean_dist)
-        
-        # print(f"\n  [收敛检查]")
-        # print(f"    距离变化: {dist_change:.3f}mm (阈值: {tolerance}mm)")
-        # print(f"    迭代: {icp_iter + 1}/{max_iterations} (最小: {min_iterations})")
-        
-        # if dist_change < tolerance and icp_iter >= min_iterations:
-        #     print(f"\n✓ 收敛！距离变化 {dist_change:.4f}mm < {tolerance}mm")
-        #     break
-        # elif dist_change < tolerance:
-        #     print(f"    ⚠️ 距离变化小于阈值，但未达到最小迭代次数 ({icp_iter+1}/{min_iterations})")
-        
-        # prev_mean_dist = mean_dist
-        
+        # 边界（在归一化空间）
+        bounds_norm = [
+            (params_norm_base[0]-np.pi * 50/180 / self.param_scales[0], params_norm_base[0]+np.pi * 50/180 / self.param_scales[0]),
+            (params_norm_base[1]-np.pi * 50/180 / self.param_scales[1], params_norm_base[1]+np.pi * 50/180 / self.param_scales[1]),
+            (params_norm_base[2]-np.pi / self.param_scales[2],          params_norm_base[2]+np.pi / self.param_scales[2]),
+            (params_norm_base[3]-50 / self.param_scales[3],             params_norm_base[3]+50 / self.param_scales[3]),
+            (params_norm_base[4]-50 / self.param_scales[4],             params_norm_base[4]+50 / self.param_scales[4]),
+            (params_norm_base[5]-50 / self.param_scales[5],             params_norm_base[5]+50 / self.param_scales[5]),
+            (0.8 / self.param_scales[6],                                1.2 / self.param_scales[6]),
+            (0.8 / self.param_scales[7],                                1.2 / self.param_scales[7]),
+        ]
+
+        # 全局最优
+        best_global_params_norm = params_norm_base.copy()
+        best_global_cost = float('inf')
+        initial_params_saved = initial_params.copy()
+
+        rng = np.random.default_rng(0)
+
+        # 多尺度循环：从粗到细
+        max_spacing = max(scales)
+        min_spacing = min(scales)
+
+        for level, spacing in enumerate(scales):
+            print(f"\n{'-'*80}")
+            print(f" 多尺度级别 {level+1}/{len(scales)} : grid_spacing = {spacing:.2f} mm")
+            print(f"{'-'*80}")
+            self.grid_spacing = float(spacing)
+
+            # === 1) 本级别内层迭代次数（已加过） ===
+            scale_factor_iter = max_spacing / spacing  # spacing越小 → factor越大
+            scale_factor_iter = np.clip(scale_factor_iter, 0.5, 2)
+            inner_iters_level = int(inner_opt_iterations * float(scale_factor_iter))
+            inner_iters_level = max(5, inner_iters_level)  # 最少给一点迭代
+            print(f"  当前级别内层迭代次数: {inner_iters_level} (基础={inner_opt_iterations})")
+
+            # === 2) 本级别的 step size 缩放（粗尺度步长大，细尺度步长小） ===
+            # 这里用一个简单规则：在 [0.5, 2.0] 之间线性缩放
+            # spacing 越大 → factor 越大
+            step_scale_factor = spacing / min_spacing    # 最细尺度 factor=1
+            step_scale_factor = float(np.clip(step_scale_factor, 0.5, 4.0))
+            print(f"  当前级别 step 缩放因子: {step_scale_factor:.2f}")
+
+            # 这一尺度上的最优
+            best_level_params_norm = best_global_params_norm.copy()
+            best_level_cost = float('inf')
+
+            # 构造该尺度的多初值
+            start_params_list = []
+            # 第一个初值：上一尺度全局最优
+            start_params_list.append(best_global_params_norm.copy())
+            # 其余初值：在当前最优附近做小扰动
+            for s_idx in range(1, n_starts):
+                perturb = np.zeros_like(best_global_params_norm)
+                # 角度扰动（弧度）
+                perturb[0:3] = np.radians(rng.normal(0.0, 5.0, size=3)) / self.param_scales[0:3]
+                # 平移扰动（mm）
+                perturb[3:6] = rng.normal(0.0, 5.0, size=3) / self.param_scales[3:6]
+                # 缩放扰动
+                perturb[6:8] = rng.normal(0.0, 0.05, size=2) / self.param_scales[6:8]
+                start_params_list.append(best_global_params_norm + perturb)
+
+            optimizer_mode = inner_optimizer.lower()
+
+            for s_idx, params_norm_start in enumerate(start_params_list):
+                print(f"\n  >> 级别 {level+1}, 初值 {s_idx+1}/{len(start_params_list)}")
+                print(f"     初始参数(归一化): {params_norm_start}")
+
+                x0 = params_norm_start.copy()
+
+                if optimizer_mode == 'gps':
+                    print(f"    使用GPS优化...")
+                    # 基础 step_scales
+                    base_step_scales = np.array(
+                        inner_optimizer_params.get('step_scales', [2.0, 2.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0]),
+                        dtype=float
+                    )
+                    # 根据当前尺度放缩
+                    gps_step_scales = base_step_scales * step_scale_factor
+
+                    gps_contraction = np.array(
+                        inner_optimizer_params.get('per_dim_contraction', [0.9, 0.9, 0.9, 0.6, 0.6, 0.6, 0.75, 0.75]),
+                        dtype=float
+                    )
+                    gps_expansion = np.array(
+                        inner_optimizer_params.get('per_dim_expansion', [1.1, 1.1, 1.1, 1.3, 1.3, 1.3, 1.05, 1.05]),
+                        dtype=float
+                    )
+
+                    result = self.generalized_pattern_search(
+                        self.correspondence_cost,
+                        x0=x0,
+                        bounds=bounds_norm,
+                        max_iter=inner_iters_level,
+                        tol=inner_optimizer_params.get('tol', 1e-6),
+                        # 初始步长也随尺度缩放
+                        initial_step=inner_optimizer_params.get('initial_step', 0.1) * step_scale_factor,
+                        expansion_factor=inner_optimizer_params.get('expansion_factor', 2.0),
+                        contraction_factor=inner_optimizer_params.get('contraction_factor', 0.5),
+                        step_scales=gps_step_scales,
+                        per_dim_contraction=gps_contraction,
+                        per_dim_expansion=gps_expansion,
+                        min_step=inner_optimizer_params.get('min_step', 1e-8)
+                    )
+                    current_params_norm = result['best_params']
+                    current_cost = result['best_cost']
+                    print(f"    GPS评估次数: {result['nfev']}")
+                    print(f"    GPS最终步长: {result['final_step_size']:.2e}")
+
+                elif optimizer_mode in {'coordinate', 'cyclic'}:
+                    print(f"    使用坐标轮换搜索...")
+                    base_coord_steps = np.array(
+                        inner_optimizer_params.get('per_dim_initial_step', [0.05, 0.05, 0.05, 1, 1, 1, 0.02, 0.02]),
+                        dtype=float
+                    )
+                    coord_steps = base_coord_steps * step_scale_factor
+                    result = self.coordinate_cyclic_search(
+                        self.correspondence_cost,
+                        x0=x0,
+                        bounds=bounds_norm,
+                        max_iter=inner_iters_level,
+                        initial_step=inner_optimizer_params.get('initial_step', 0.2) * step_scale_factor,
+                        per_dim_initial_step=coord_steps,
+                        step_decay=inner_optimizer_params.get('step_decay', 0.6),
+                        min_step=inner_optimizer_params.get('min_step', 1e-4)
+                    )
+                    current_params_norm = result['best_params']
+                    current_cost = result['best_cost']
+
+                elif optimizer_mode in {'cg', 'conjugate_gradient'}:
+                    print(f"    使用共轭梯度优化...")
+                    # grad_step 也随尺度放缩（粗尺度可取大一点数值步长）
+                    base_grad_step = inner_optimizer_params.get('grad_step', 1e-3)
+                    grad_step_level = base_grad_step * step_scale_factor
+                    result = self.conjugate_gradient_optimize(
+                        objective_func=self.correspondence_cost,
+                        x0=x0,
+                        bounds=bounds_norm,
+                        max_iter=inner_iters_level,
+                        tol=inner_optimizer_params.get('tol', 1e-4),
+                        grad_step=grad_step_level,
+                        line_search_start=inner_optimizer_params.get('line_search_start', 1.0),
+                        line_search_shrink=inner_optimizer_params.get('line_search_shrink', 0.5),
+                        armijo_coeff=inner_optimizer_params.get('armijo_coeff', 1e-4),
+                        beta_strategy=inner_optimizer_params.get('beta_strategy', 'pr')
+                    )
+                    current_params_norm = result['best_params']
+                    current_cost = result['best_cost']
+                    print(f"    CG评估次数: {result['nfev']}")
+                    print(f"    CG状态: {result['status']}")
+
+                elif optimizer_mode in {'powell'}:
+                    print(f"    使用Powell优化...")
+                    def project_to_bounds(x_vec):
+                        x_proj = x_vec.copy()
+                        for i, (lb, ub) in enumerate(bounds_norm):
+                            x_proj[i] = np.clip(x_proj[i], lb, ub)
+                        return x_proj
+                    def bounded_objective(x_vec):
+                        x_bounded = project_to_bounds(x_vec)
+                        return self.correspondence_cost(x_bounded)
+
+                    # Powell 没有显式 step size，但 xtol/ftol 可以随尺度放宽/收紧
+                    base_xtol = inner_optimizer_params.get('tol', 1e-4)
+                    base_ftol = inner_optimizer_params.get('ftol', 1e-4)
+                    xtol_level = base_xtol * (1.0 / step_scale_factor)  # 粗尺度容差大一点
+                    ftol_level = base_ftol * (1.0 / step_scale_factor)
+
+                    scipy_result = minimize(
+                        bounded_objective,
+                        x0=x0,
+                        method='powell',
+                        options={
+                            'maxiter': inner_iters_level,
+                            'xtol': xtol_level,
+                            'ftol': ftol_level,
+                            'disp': False
+                        }
+                    )
+                    current_params_norm = project_to_bounds(scipy_result.x)
+                    current_cost = float(scipy_result.fun)
+                    print(f"    Powell评估次数: {scipy_result.nfev}")
+                    print(f"    Powell迭代次数: {scipy_result.nit}")
+                    print(f"    Powell状态: {'成功' if scipy_result.success else '未收敛'}")
+
+                else:
+                    raise ValueError(f"未知内层优化器: {inner_optimizer}")
+
+                print(f"    本次初值最优代价: {current_cost:.3f}mm")
+
+                # 更新该尺度最优
+                if current_cost < best_level_cost:
+                    best_level_cost = current_cost
+                    best_level_params_norm = current_params_norm.copy()
+                    print(f"    ✓ 更新级别 {level+1} 最优解")
+
+                # 更新全局最优
+                if current_cost < best_global_cost:
+                    best_global_cost = current_cost
+                    best_global_params_norm = current_params_norm.copy()
+                    print(f"    ★ 更新全局最优解: cost={best_global_cost:.3f}mm")
+
+            # 下一尺度以当前尺度的最优为基准
+            params_norm_base = best_level_params_norm.copy()
+
+        # 全部尺度结束
+        self.best_params = best_global_params_norm.copy()
+        self.best_cost = best_global_cost
         elapsed_time = time.time() - start_time
-        
-        # 提取最终结果
+
+        # ===== 评估最终参数 =====
+        print(f"\n{'='*60}")
+        print(f"评估最终参数...")
+        print(f"{'='*60}")
+        final_mean_dist, final_label_dists, final_mean_dice, final_apex_dist, final_mitral_dist, final_tricuspid_dist = self.evaluate_metric(
+            self.best_params, self.labels, self.us_label_points
+        )
+
+        # 保存最终评估结果
+        final_evaluation = {
+            'mean_distance': final_mean_dist,
+            'mean_dice': final_mean_dice,
+            'apex_distance': final_apex_dist,
+            'mitral_distance': final_mitral_dist,
+            'tricuspid_annulus_distance': final_tricuspid_dist
+        }
+
+        # 提取最终结果（在最细尺度下）
         best_slice, _ = self.extract_slice_from_volume(*self.best_params * self.param_scales)
-        # 提取初始边缘点
+        # 初始/最终label点提取（用于可视化）
         try:
             initial_slice, initial_mask = self.extract_slice_from_volume(
                 *initial_params_saved, extract_mask=True
@@ -1960,9 +2039,9 @@ class TwoD_ThreeD_Registration:
             initial_ct_label_points = self.extract_edge_points_by_label(
                 initial_slice, initial_mask, labels=self.labels, subsample=3
             )
-        except:
+        except Exception:
             initial_ct_label_points = None
-        # 提取最终边缘点
+
         try:
             final_slice, final_mask = self.extract_slice_from_volume(
                 *self.best_params * self.param_scales, extract_mask=True
@@ -1970,10 +2049,9 @@ class TwoD_ThreeD_Registration:
             final_ct_label_points = self.extract_edge_points_by_label(
                 final_slice, final_mask, labels=self.labels, subsample=3
             )
-        except:
+        except Exception:
             final_ct_label_points = None
         
-        # 准备结果
         result_dict = {
             'best_params': self.best_params,
             'initial_params': initial_params_saved,
@@ -1983,27 +2061,101 @@ class TwoD_ThreeD_Registration:
             'translation': self.best_params[3:6] * self.param_scales[3:6],
             'scaling': self.best_params[6:8] * self.param_scales[6:8],
             'final_cost': self.best_cost,
-            'num_iterations': len(result['history']),
+            'num_iterations': len(self.optimization_history),
             'elapsed_time': elapsed_time,
             'best_slice': best_slice,
             'us_label_points': self.us_label_points,
             'initial_ct_label_points': initial_ct_label_points,
             'final_ct_label_points': final_ct_label_points,
-            'labels': self.labels
+            'labels': self.labels,
+            'initial_evaluation': initial_evaluation,
+            'final_evaluation': final_evaluation
         }
         
         print(f"\n{'='*60}")
-        print(f"多标签ICP配准完成！")
-        print(f"  总迭代次数: {result_dict['num_iterations']}")
-        print(f"  最终代价: {self.best_cost:.3f}mm")
+        print(f"多尺度多初值配准完成！")
+        print(f"  全局最优代价: {self.best_cost:.3f}mm")
         print(f"  旋转角度: α={result_dict['alpha_deg']:.2f}°, "
               f"β={result_dict['beta_deg']:.2f}°, γ={result_dict['gamma_deg']:.2f}°")
         print(f"  平移: ({result_dict['translation'][0]:.2f}, {result_dict['translation'][1]:.2f}, {result_dict['translation'][2]:.2f}) mm")
         print(f"  缩放: ({result_dict['scaling'][0]:.3f}, {result_dict['scaling'][1]:.3f})")
-        print(f"  耗时: {elapsed_time:.1f}秒")
+        print(f"  总耗时: {elapsed_time:.1f}秒")
         print(f"{'='*60}\n")
         
+        # ===== 保存评估结果到CSV =====
+        if output_dir is not None and patient_id is not None:
+            self._save_evaluation_to_csv(
+                output_dir,
+                patient_id,
+                initial_evaluation,
+                final_evaluation
+            )
+        
         return self.best_params, result_dict
+
+    def _save_evaluation_to_csv(
+        self,
+        output_dir: str,
+        patient_id: str,
+        initial_evaluation: dict,
+        final_evaluation: dict
+    ):
+        """
+        保存评估结果到CSV文件
+        
+        Args:
+            output_dir: 输出目录
+            patient_id: 患者ID
+            initial_evaluation: 初始参数评估结果
+            final_evaluation: 最终参数评估结果
+        """
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        
+        csv_path = output_path / "optimization_evaluation_results.csv"
+        
+        # 准备数据行
+        row_data = {
+            'patient_id': patient_id,
+            # 初始评估结果
+            'initial_mean_distance': initial_evaluation['mean_distance'],
+            'initial_mean_dice': initial_evaluation['mean_dice'],
+            'initial_apex_distance': initial_evaluation['apex_distance'],
+            'initial_mitral_distance': initial_evaluation['mitral_distance'],
+            'initial_tricuspid_annulus_distance': initial_evaluation['tricuspid_annulus_distance'],
+            # 最终评估结果
+            'final_mean_distance': final_evaluation['mean_distance'],
+            'final_mean_dice': final_evaluation['mean_dice'],
+            'final_apex_distance': final_evaluation['apex_distance'],
+            'final_mitral_distance': final_evaluation['mitral_distance'],
+            'final_tricuspid_annulus_distance': final_evaluation['tricuspid_annulus_distance'],
+            # 改进量
+            'improvement_mean_distance': initial_evaluation['mean_distance'] - final_evaluation['mean_distance'],
+            'improvement_mean_dice': final_evaluation['mean_dice'] - initial_evaluation['mean_dice'],
+            'improvement_apex_distance': initial_evaluation['apex_distance'] - final_evaluation['apex_distance'],
+            'improvement_mitral_distance': initial_evaluation['mitral_distance'] - final_evaluation['mitral_distance'],
+            'improvement_tricuspid_annulus_distance': initial_evaluation['tricuspid_annulus_distance'] - final_evaluation['tricuspid_annulus_distance']
+        }
+        
+        # 如果CSV文件已存在，读取并追加
+        if csv_path.exists():
+            df = pd.read_csv(csv_path)
+            # 检查是否已存在该patient的记录
+            if patient_id in df['patient_id'].values:
+                # 更新现有记录
+                idx = df[df['patient_id'] == patient_id].index[0]
+                for key, value in row_data.items():
+                    df.at[idx, key] = value
+            else:
+                # 追加新记录
+                df = pd.concat([df, pd.DataFrame([row_data])], ignore_index=True)
+        else:
+            # 创建新的DataFrame
+            df = pd.DataFrame([row_data])
+        
+        # 保存CSV
+        df.to_csv(csv_path, index=False)
+        print(f"✓ 评估结果已保存到CSV: {csv_path}")
 
     def register_icp_multi_label_org(
         self,
@@ -2456,7 +2608,7 @@ class TwoD_ThreeD_Registration:
             for label_id, pts in label_dict.items():
                 if pts is None or len(pts) == 0:
                     continue
-                pts_all.append(pts)
+                pts_all.append(pts[:,::-1])
                 label_ids.append(np.full(len(pts), label_id))
             if not pts_all:
                 return np.empty((0, 2)), np.array([])
@@ -2545,6 +2697,7 @@ class TwoD_ThreeD_Registration:
         # 标签点云：初始
         ax_label_before = axes[1, 0]
         ax_label_before.set_title('Before Registration: Label Alignment', fontsize=14, fontweight='bold')
+        
         # US points
         ax_label_before.scatter(
             us_pts_all[:, 0], us_pts_all[:, 1],
@@ -2566,6 +2719,7 @@ class TwoD_ThreeD_Registration:
         ax_label_before.grid(True, alpha=0.3)
         ax_label_before.axis('equal')
         ax_label_before.legend(fontsize=9, loc='upper right')
+        ax_label_before.invert_yaxis()  # 反转y轴，从下到上从大到小
         
         # 标签点云：最终
         ax_label_after = axes[1, 1]
@@ -2589,6 +2743,7 @@ class TwoD_ThreeD_Registration:
         ax_label_after.grid(True, alpha=0.3)
         ax_label_after.axis('equal')
         ax_label_after.legend(fontsize=9, loc='upper right')
+        ax_label_after.invert_yaxis()  # 反转y轴，从下到上从大到小
         
         plt.tight_layout()
         
@@ -2735,6 +2890,28 @@ class TwoD_ThreeD_Registration:
         mse = np.mean(diff ** 2)
         return mse
 
+def load_params(ct_slices_path: str, coarse_regis_result_path: str, patient_id: str) -> np.ndarray:
+    """加载参数"""
+    coarse_regis_result_path = os.path.join(coarse_regis_result_path, "best_registration_summary.csv")
+    coarse_regis_result = pd.read_csv(coarse_regis_result_path)
+    best_slice_name = coarse_regis_result[coarse_regis_result['fixed_image'] == f"{patient_id}_A4C.nii.gz"]['best_moving_image'].values[0]
+
+    slice_params_path = os.path.join(ct_slices_path, f"{patient_id}_image", "slice_parameters.csv")
+    slice_params = pd.read_csv(slice_params_path)
+    slice_params = slice_params[slice_params['filename'] == best_slice_name]
+    translation = slice_params['translation'].values[0]
+    translation = [float(x) for x in translation.strip("[]").split(",")]
+
+    alpha = best_slice_name[best_slice_name.find('rx')+2:best_slice_name.find('_ry')]
+    beta = best_slice_name[best_slice_name.find('ry')+2:best_slice_name.find('.nii.gz')]
+    initial_params = np.array([
+        np.radians(float(alpha)),   # alpha: 0°
+        np.radians(float(beta)),  # beta: 0°
+        np.radians(0),   # gamma: 0°
+        translation[0], translation[1], translation[2],   # translation: (0, 0, 5) mm
+        1.0, 1.0         # scaling: (1.0, 1.0)
+    ])
+    return best_slice_name, initial_params
 
 # ============================================================================
 # 使用示例
@@ -2796,6 +2973,96 @@ def main():
     sitk.WriteImage(result_dict['best_slice'], str(best_slice_path))
     print(f"✓ 最优切片已保存: {best_slice_path}")
 
+def batch_register():
+    """批量注册"""
+    ct_slices_path = r"D:\dataset\TEECT_data\ct_paired"
+    coarse_regis_result_path = r"D:\dataset\TEECT_data\registration_results_paired\icp_chamber_pt_batch"
+    data_dir = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset"
+    
+    # CSV汇总文件路径（所有patient的结果汇总）
+    summary_csv_path = Path(r"D:\dataset\TEECT_data\registration_results_paired\2d_3d_multi_label") / "all_patients_evaluation_summary.csv"
+    
+    for i in range(50):
+        patient_id = f"Patient_00{i:02d}"
+        if patient_id not in ["Patient_0006"]:
+            continue
+        best_slice_name, initial_params = load_params(ct_slices_path, coarse_regis_result_path, patient_id)
+        best_slice_path = os.path.join(r"D:\dataset\TEECT_data\ct_paired", f"{patient_id}_image", best_slice_name)
+        ct_path = os.path.join(data_dir, "CT_resampled_nii", f"{patient_id}.nii.gz")
+        ultrasound_path = os.path.join(data_dir, "Multi-view_preprocess_images_nii", f"{patient_id}_A4C.nii.gz")
+        ct_mask_path = os.path.join(data_dir, "CT_segmentation", patient_id, f"{patient_id}_label.nii.gz")
+        us_mask_path = os.path.join(data_dir, "US_segmentation", f"{patient_id}_A4C.nii.gz")
+        output_dir = os.path.join(r"D:\dataset\TEECT_data\registration_results_paired\2d_3d_multi_label", f"{patient_id}_A4C")
+
+        registrator = TwoD_ThreeD_Registration()
+        registrator.load_images(ct_path, ultrasound_path, ct_mask_path, us_mask_path)
+        registrator.transform_us(patient_id, coarse_regis_result_path, best_slice_path)
+
+        best_params, result_dict = registrator.register_multi_label(
+            initial_params=initial_params,
+            max_iterations=10,
+            tolerance=0.1,
+            max_correspondence_dist=30.0,
+            inner_opt_iterations=100,
+            inner_optimizer='coordinate',
+            labels=[1, 2, 3, 4],
+            label_weights=None,
+            scales=[1.0],
+            n_starts=1,
+            patient_id=patient_id,  # 传递patient_id
+            output_dir=output_dir   # 传递output_dir
+        )
+        registrator.visualize_result(result_dict, output_dir)
+        registrator.visualize_multi_label_correspondences(
+            result_dict, 
+            output_dir,
+            max_correspondence_dist=30.0
+        )
+        stats_path = Path(output_dir) / "result.txt"
+        with open(stats_path, 'w', encoding='utf-8') as f:
+            f.write(str(result_dict['best_params']))
+        # 汇总到总CSV文件
+        if 'initial_evaluation' in result_dict and 'final_evaluation' in result_dict:
+            summary_row = {
+                'patient_id': patient_id,
+                'initial_mean_distance': result_dict['initial_evaluation']['mean_distance'],
+                'initial_mean_dice': result_dict['initial_evaluation']['mean_dice'],
+                'initial_apex_distance': result_dict['initial_evaluation']['apex_distance'],
+                'initial_mitral_distance': result_dict['initial_evaluation']['mitral_distance'],
+                'initial_tricuspid_annulus_distance': result_dict['initial_evaluation']['tricuspid_annulus_distance'],
+                'final_mean_distance': result_dict['final_evaluation']['mean_distance'],
+                'final_mean_dice': result_dict['final_evaluation']['mean_dice'],
+                'final_apex_distance': result_dict['final_evaluation']['apex_distance'],
+                'final_mitral_distance': result_dict['final_evaluation']['mitral_distance'],
+                'final_tricuspid_annulus_distance': result_dict['final_evaluation']['tricuspid_annulus_distance'],
+                'improvement_mean_distance': (result_dict['initial_evaluation']['mean_distance'] - 
+                                            result_dict['final_evaluation']['mean_distance']),
+                'improvement_mean_dice': (result_dict['final_evaluation']['mean_dice'] - 
+                                        result_dict['initial_evaluation']['mean_dice']),
+                'improvement_apex_distance': (result_dict['initial_evaluation']['apex_distance'] - 
+                                             result_dict['final_evaluation']['apex_distance']),
+                'improvement_mitral_distance': (result_dict['initial_evaluation']['mitral_distance'] - 
+                                               result_dict['final_evaluation']['mitral_distance']),
+                'improvement_tricuspid_annulus_distance': (result_dict['initial_evaluation']['tricuspid_annulus_distance'] - 
+                                                          result_dict['final_evaluation']['tricuspid_annulus_distance']),
+                'elapsed_time': result_dict['elapsed_time']
+            }
+            
+            # 保存或追加到汇总CSV
+            if summary_csv_path.exists():
+                summary_df = pd.read_csv(summary_csv_path)
+                if patient_id in summary_df['patient_id'].values:
+                    idx = summary_df[summary_df['patient_id'] == patient_id].index[0]
+                    for key, value in summary_row.items():
+                        summary_df.at[idx, key] = value
+                else:
+                    summary_df = pd.concat([summary_df, pd.DataFrame([summary_row])], ignore_index=True)
+                summary_df.to_csv(summary_csv_path, index=False)
+            else:
+                summary_df = pd.DataFrame([summary_row])
+                summary_df.to_csv(summary_csv_path, index=False)
+            
+            print(f"✓ {patient_id} 评估结果已汇总到: {summary_csv_path}")
 
 def register_multi_label():
     """主函数 - 多标签ICP配准"""
@@ -2804,19 +3071,25 @@ def register_multi_label():
     registrator = TwoD_ThreeD_Registration()
    
     # # 加载数据（包括mask）
-    ct_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\CT_resampled_nii\Patient_0000.nii.gz"
-    ultrasound_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\Multi-view_preprocess_images\Patient_0000\A4C_initial_transform.nii.gz"
-    # ultrasound_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\Multi-view_preprocess_images\Patient_0000\A2C_initial_transform.nii.gz"
-    ct_mask_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\Segmentation\Patient_0000\Patient_0000_label.nii.gz"  # CT心脏mask路径
-    us_mask_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\Multi-view_preprocess_images\Patient_0000\A4C_seg_initial_transform.nii.gz"
-    # us_mask_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\Multi-view_preprocess_images\Patient_0000\A2C_seg_initial_transform.nii.gz"
-    output_dir = r"D:\dataset\TEECT_data\registration_results_paired\2d_3d_multi_label\Patient_0000_A4C"
+    # ct_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\CT_resampled_nii\Patient_0000.nii.gz"
+    # ultrasound_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\Multi-view_preprocess_images\Patient_0000\A4C_initial_transform.nii.gz"
+    # # ultrasound_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\Multi-view_preprocess_images\Patient_0000\A2C_initial_transform.nii.gz"
+    # ct_mask_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\Segmentation\Patient_0000\Patient_0000_label.nii.gz"  # CT心脏mask路径
+    # us_mask_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\Multi-view_preprocess_images\Patient_0000\A4C_seg_initial_transform.nii.gz"
+    # # us_mask_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\Multi-view_preprocess_images\Patient_0000\A2C_seg_initial_transform.nii.gz"
+    # output_dir = r"D:\dataset\TEECT_data\registration_results_paired\2d_3d_multi_label\Patient_0000_A4C_multi_scale"
     
-    # ct_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\CT_resampled_nii\Patient_0036.nii.gz"
-    # ultrasound_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\Multi-view_preprocess_images\Patient_0036\A4C1_initial_transform.nii.gz"
-    # ct_mask_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\Segmentation\Patient_0036\Patient_0036_label.nii.gz"  # CT心脏mask路径
-    # us_mask_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\Multi-view_preprocess_images\Patient_0036\A4C_seg1_initial_transform.nii.gz"
-    # output_dir = r"D:\dataset\TEECT_data\registration_results_paired\2d_3d_multi_label\Patient_0036"
+    ct_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\CT_resampled_nii\Patient_0036.nii.gz"
+    ultrasound_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\Multi-view_preprocess_images\Patient_0036\A2C_initial_transform.nii.gz"
+    ct_mask_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\Segmentation\Patient_0036\Patient_0036_label.nii.gz"  # CT心脏mask路径
+    us_mask_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\Multi-view_preprocess_images\Patient_0036\A2C_seg_initial_transform.nii.gz"
+    output_dir = r"D:\dataset\TEECT_data\registration_results_paired\2d_3d_multi_label\Patient_0036_A2C"
+
+    # ct_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\CT_resampled_nii\Patient_0006.nii.gz"
+    # ultrasound_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\Multi-view_preprocess_images\Patient_0006\PSAX_PAP_initial_transform.nii.gz"
+    # ct_mask_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\Segmentation\Patient_0006\Patient_0006_label.nii.gz"  # CT心脏mask路径
+    # us_mask_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\Multi-view_preprocess_images\Patient_0006\PSAX_PAP_masked_initial_transform.nii.gz"
+    # output_dir = r"D:\dataset\TEECT_data\registration_results_paired\2d_3d_multi_label\Patient_0006_PAP"
 
     # ct_path = r"D:\dataset\CT\MM-WHS2017\ct_train\ct_train_1004_image.nii"
     # ultrasound_path = r"D:\dataset\TEECT_data\tee\patient-1-4\slice_060_image_initial_transform.nii.gz"
@@ -2828,13 +3101,16 @@ def register_multi_label():
     
     # 初始参数
     initial_params = np.array([
-        np.radians(25),   # alpha: 50°
-        np.radians(0),  # beta: -25°
+        np.radians(50),   # alpha: 50°
+        np.radians(-50),  # beta: -25°
         np.radians(0),    # gamma: 0°
         # 5.77, -163.36, 5.0,   # translation: (x, y, z) mm
-        3.0, 17.0, 6.0,  #Patient_0000 A4C
+        # 3.0, 17.0, 6.0,  #Patient_0000 A4C
+        # 3.0, 17.0, 6.0,  #Patient_0000 A4C
+        # 16.0, 1.0, -12.0,  #Patient_0006 PAP
         # 3.0, 17.0, -4.0,  #Patient_0000 A2C
         # 3.0, 5.0, 0.5, #Patient_0036 A4C
+        3.0, 5.0, -9.5, #Patient_0036 A4C
         1.0, 1.0         # scaling: (sx, sy)
     ])
     
@@ -2852,17 +3128,21 @@ def register_multi_label():
         # min_iterations=2,  # 最小迭代次数（避免过早停止）
         inner_optimizer='coordinate',  # coordinate/gps/powell
         labels=[1, 2, 3, 4],  # 使用所有四腔标签
-        label_weights=None  # 默认权重
+        label_weights=None,  # 默认权重
+        # scales=[4.0, 2.0, 1.0],        # ★ 粗→细
+        scales=[1.0],        # ★ 粗→细
+        n_starts=1                     # ★ 每个尺度3个初值
     )
     
     # 可视化结果
-    registrator.visualize_result(result_dict_1, output_dir + "_equal_weight")
+    registrator.visualize_result(result_dict_1, output_dir)
     registrator.visualize_multi_label_correspondences(
         result_dict_1, 
-        output_dir + "_equal_weight",
+        output_dir,
         max_correspondence_dist=30.0
     )
 
 if __name__ == "__main__":
     # main()
-    register_multi_label()
+    batch_register()
+    # register_multi_label()

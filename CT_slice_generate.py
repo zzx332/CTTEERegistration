@@ -401,38 +401,13 @@ class CT3DSliceGenerator:
         plt.show()
 
 
-def main():
-    """
-    主函数示例
-    """
-    # ===== 配置参数 =====
-    
-    # CT图像路径（修改为你的实际路径）
-    # ct_image_path = "D:\dataset\CT\MM-WHS2017\ct_train\ct_train_1004_label.nii"  # 或DICOM文件夹路径
-    ct_image_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\CT_resampled_nii\Patient_0036.nii.gz"  # 或DICOM文件夹路径
-    # ct_image_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\Segmentation\Patient_0036\Patient_0036_label.nii.gz"  # 或DICOM文件夹路径
-    output_dir = "D:\dataset\TEECT_data\ct_paired\Patient_0036_image"      # 输出目录
-    # output_dir = "D:\dataset\TEECT_data\ct_paired\Patient_0000_label"      # 输出目录
-    label_tag = False
-    # 初始平面中心点（体素坐标）
-    # 例如：图像中心或感兴趣区域的中心
-    # 可以设置为图像中心：(size[0]/2, size[1]/2, size[2]/2)
-    # center_point_voxel = None  # 设置为None时自动使用图像中心，或手动指定如 (128, 128, 64)
-    # center_point_voxel = (274,254,100)
-    # center_point_voxel = (100,86,81) #Patient_0000
-    center_point_voxel = (90,88,62) #Patient_0036
-    use_voxel_coord = True  # 使用体素坐标
-    
-    # 初始平面法向量（不需要归一化）
-    normal_vector = (0.0, 0.0, 1.0)  # 例如：轴向平面
+def generate_for_one_patient(volume_path, output_dir, label_tag, center_point_voxel, normal_vector= (0.0, 0.0, 1.0), use_voxel_coord=True):
     
     # 切片生成参数
     translation_range = 5.0    # ±5mm
     translation_step = 2.5     # 2.5mm步长
     rotation_range = 50      # ±90度
-    # rotation_range = 0.0      # ±0度
     rotation_step = 25       # 45度步长
-    # rotation_step = 0
     
     # 输出切片的大小和分辨率
     slice_size = (512, 512)           # 像素
@@ -445,7 +420,7 @@ def main():
     print("=" * 60)
     
     # 创建生成器
-    generator = CT3DSliceGenerator(ct_image_path)
+    generator = CT3DSliceGenerator(volume_path)
     
     print(f"\nCT图像信息:")
     print(f"  尺寸: {generator.size} (体素)")
@@ -492,15 +467,49 @@ def main():
     print(f"\n切片提取完成！共生成 {len(slices)} 个切片")
     print(f"切片已保存到: {output_dir}/")
     
-    # 可视化部分样本
-    print(f"\n生成可视化样本...")
-    generator.visualize_sample_slices(slices, slice_planes, num_samples=9)
-    print(f"样本可视化已保存: sample_slices.png")
+    # # 可视化部分样本
+    # print(f"\n生成可视化样本...")
+    # generator.visualize_sample_slices(slices, slice_planes, num_samples=9)
+    # print(f"样本可视化已保存: sample_slices.png")
     
-    print("\n" + "=" * 60)
-    print("完成！")
-    print("=" * 60)
+    # print("\n" + "=" * 60)
+    # print("完成！")
+    # print("=" * 60)
 
 
 if __name__ == "__main__":
-    main()
+    import os
+    from LV_apex_cal import find_annulus, calculate_mitral_annulus_center
+
+    image_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\CT_resampled_nii"
+    label_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\CT_segmentation"
+    output_path = r"D:\dataset\TEECT_data\ct_paired"
+    for file in os.listdir(image_path):
+        patient_id = file.split(".")[0]
+        if patient_id != "Patient_0006":
+            continue
+        output_image_dir = os.path.join(output_path, patient_id + "_image")
+        output_label_dir = os.path.join(output_path, patient_id + "_label")
+
+        if os.path.exists(output_image_dir) and os.path.exists(output_label_dir):
+            continue
+        os.makedirs(output_image_dir, exist_ok=True)
+        os.makedirs(output_label_dir, exist_ok=True)
+        label_array = sitk.ReadImage(os.path.join(label_path, patient_id, f"{patient_id}_label.nii.gz"))
+        label_array = sitk.GetArrayFromImage(label_array)
+        label_dict = {"rv_label": 1, "ra_label": 2, "lv_label": 4, "la_label": 3}
+        mitral_points = find_annulus(label_array, v_label=label_dict["lv_label"], a_label=label_dict["la_label"])
+        mitral_center = calculate_mitral_annulus_center(mitral_points)
+        mitral_center = tuple(mitral_center.astype(float))[::-1]
+        generate_for_one_patient(
+            volume_path=os.path.join(image_path, file),
+            output_dir=output_image_dir,
+            label_tag=False,
+            center_point_voxel=mitral_center
+        )
+        generate_for_one_patient(
+            volume_path=os.path.join(label_path, patient_id, f"{patient_id}_label.nii.gz"),
+            output_dir=output_label_dir,
+            label_tag=True,
+            center_point_voxel=mitral_center
+        )

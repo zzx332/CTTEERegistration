@@ -599,13 +599,13 @@ class EdgeBasedICPRegistration:
         # 读取边缘图
         fixed_img = sitk.ReadImage(fixed_edge_path)
         moving_img = sitk.ReadImage(moving_edge_path)
-        print("  转换超声图像坐标系...")
+        # print("  转换超声图像坐标系...")
         # fixed_img = sitk.Flip(fixed_img, flipAxes=[True, True])
         # fixed_img.SetOrigin((0,0))
         # print("    已转换为左手坐标系（X轴翻转, Y轴翻转）")
         # moving_img = sitk.Flip(moving_img, flipAxes=[True, True])
         # moving_img.SetOrigin((0,0))
-        print("    已转换为左手坐标系（X轴翻转, Y轴翻转）")
+        # print("    已转换为左手坐标系（X轴翻转, Y轴翻转）")
         fixed_array = sitk.GetArrayFromImage(fixed_img).squeeze()
         moving_array = sitk.GetArrayFromImage(moving_img).squeeze()
         
@@ -1016,11 +1016,15 @@ class EdgeBasedICPRegistration:
         print(f"{'='*60}\n")
         
         results = []
-        
+        # 在进入 for 循环之前初始化
+        best_mean_dice = -float("inf")
+        best_moving_path = None
+        best_metrics = None
+
         for moving_path in moving_files:
             try:
-                if moving_path.name not in ["slice_117_t5.0_rx25_ry0.nii.gz"]:
-                    continue
+                # if moving_path.name not in ["slice_117_t5.0_rx25_ry0.nii.gz"]:
+                #     continue
                 moving_landmarks, fixed_landmarks = self.compute_landmarks(fixed_edge_path, moving_path)
                 if len(moving_landmarks) != len(fixed_landmarks):
                     print(moving_path.name, "moving_landmarks和fixed_landmarks点对数量不一致")
@@ -1043,7 +1047,14 @@ class EdgeBasedICPRegistration:
                 metrics['moving_image'] = moving_path.name
                 metrics['success'] = True
                 results.append(metrics)
-                
+
+                # 记录 mean_dice 最佳的 moving_path
+                if 'mean_dice' in metrics:
+                    if metrics['mean_dice'] > best_mean_dice:
+                        best_mean_dice = metrics['mean_dice']
+                        best_moving_path = moving_path.name
+                        best_metrics = metrics
+
             except Exception as e:
                 print(f"✗ 配准失败: {moving_path.name}")
                 print(f"  错误: {e}")
@@ -1053,20 +1064,59 @@ class EdgeBasedICPRegistration:
                     'error': str(e)
                 })
         
-        # 保存结果
+        # 循环结束后输出最佳结果
+        if best_moving_path is not None:
+            print(f"\n{'='*60}")
+            print(f"★ 最佳配准结果:")
+            print(f"  Fixed图像: {Path(fixed_edge_path).name}")
+            print(f"  Best Moving图像: {best_moving_path}")
+            print(f"  Best Mean Dice: {best_mean_dice:.4f}")
+            if best_metrics:
+                print(f"  旋转角度: {best_metrics.get('rotation_angle_deg', 'N/A'):.2f}°")
+                print(f"  平移: ({best_metrics.get('translation_x', 'N/A'):.2f}, {best_metrics.get('translation_y', 'N/A'):.2f})")
+            print(f"{'='*60}\n")
+        else:
+            print("未找到包含 mean_dice 的有效结果")
+
+        # 保存详细结果
         df = pd.DataFrame(results)
         csv_path = output_dir / "icp_registration_results.csv"
         df.to_csv(csv_path, index=False)
         
-        excel_path = output_dir / "icp_registration_results.xlsx"
-        df.to_excel(excel_path, index=False)
+        # 保存最佳结果汇总表
+        best_result = {
+            'fixed_image': Path(fixed_edge_path).name,
+            'best_moving_image': best_moving_path if best_moving_path else 'N/A',
+            'best_mean_dice': best_mean_dice if best_moving_path else None
+        }
+        
+        best_df = pd.DataFrame([best_result])
+        # 改为 Path 对象
+        best_csv_path = Path(r"D:\dataset\TEECT_data\registration_results_paired\icp_chamber_pt_batch\best_registration_summary.csv")
+        best_csv_path.parent.mkdir(parents=True, exist_ok=True)
+
+        
+        # 如果汇总文件已存在，追加新行
+        if best_csv_path.exists():
+            existing_df = pd.read_csv(best_csv_path)
+            # 检查是否已存在相同的fixed_image记录
+            if Path(fixed_edge_path).name in existing_df['fixed_image'].values:
+                # 更新现有记录
+                idx = existing_df[existing_df['fixed_image'] == Path(fixed_edge_path).name].index[0]
+                existing_df.loc[idx] = best_result
+                best_df = existing_df
+            else:
+                # 追加新记录
+                best_df = pd.concat([existing_df, best_df], ignore_index=True)
+        
+        best_df.to_csv(best_csv_path, index=False)
         
         print(f"\n{'='*60}")
         print(f"✓ 批量配准完成！")
         print(f"成功: {df['success'].sum()} / {len(df)}")
         print(f"结果已保存:")
         print(f"  - {csv_path}")
-        print(f"  - {excel_path}")
+        print(f"  - {best_csv_path} (最佳结果汇总)")
 
 
 def compute_label_centroids(label_image: sitk.Image, label_ids: list = None) -> dict:
@@ -1198,22 +1248,25 @@ def batch_registration_example():
     
     icp_reg = EdgeBasedICPRegistration()
     
-    moving_label_dir = r"D:\dataset\TEECT_data\ct_paired\Patient_0000_label"
-    # fixed_label_path = r"D:\dataset\TEECT_data\tee_paired\Patient_0036\A4C_seg.nii.gz"
-    fixed_label_path = r"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\Multi-view_preprocess_images\Patient_0000\A4C_seg.nii.gz"
-    output_dir = r"D:\dataset\TEECT_data\registration_results_paired\icp_chamber_pt_batch\Patient_0000_A4C"
 
-    
-    icp_reg.batch_register(
-        fixed_edge_path=fixed_label_path,
-        moving_edge_dir=moving_label_dir,
-        output_dir=output_dir,
-        sampling_method='grid',
-        num_points=500,
-        max_iterations=100,
-        max_correspondence_distance=10.0,
-        visualize=True
-    )
+
+    for i in range(50):
+        patient_id = f"Patient_00{i:02d}"
+        if patient_id not in ["Patient_0006"]:
+            continue
+        moving_label_dir = fr"D:\dataset\TEECT_data\ct_paired\{patient_id}_label"
+        fixed_label_path = fr"D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\US_segmentation\{patient_id}_A4C.nii.gz"
+        output_dir = fr"D:\dataset\TEECT_data\registration_results_paired\icp_chamber_pt_batch\{patient_id}_A4C"
+        icp_reg.batch_register(
+            fixed_edge_path=fixed_label_path,
+            moving_edge_dir=moving_label_dir,
+            output_dir=output_dir,
+            sampling_method='grid',
+            num_points=500,
+            max_iterations=100,
+            max_correspondence_distance=10.0,
+            visualize=True
+        )
 
 
 def landmark_registration_example():

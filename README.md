@@ -18,5 +18,7 @@ TotalSegmentator -i D:\dataset\Cardiac_Multi-View_US-CT_Paired_Dataset\CT_resamp
 
 ## 精配准（基于四腔边缘的双向chamber距离）
 
-- 把切片的位置映射到原始Volume，平移计算：切片中心物理位置 - CT Volume中心物理位置(可以从切片生成时保存的平移参数文件查询)
+- 把切片的位置映射到原始Volume `implement_transform.py`
+- 初始参数计算，平移计算：切片中心物理位置 - CT Volume中心物理位置(可以从切片生成时保存的平移参数文件查询)
 - `2D_3D_registration_boundary_gps_cg.py`，`register_multi_label()`。可设置坐标轮换/GPS/Powell
+- 可自动检索参数进行批量运行的脚本`batch_register()`
